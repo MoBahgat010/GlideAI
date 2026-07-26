@@ -68,6 +68,7 @@ def get_retrieval_pipeline():
 ICONS = {
     "DOWNLOADING": "📥",
     "PARSING":     "📄",
+    "STT":         "🎙️",
     "CHUNKING":    "✂️",
     "EMBEDDING":   "🧠",
     "DONE":        "✅",
@@ -80,6 +81,19 @@ ICONS = {
 
 def _icon(stage: str) -> str:
     return ICONS.get(stage, "🔄")
+
+
+def _format_source(result: dict) -> str:
+    filename = result.get("filename", "?")
+    timestamp = result.get("video_timestamp")
+    start_minute = result.get("video_start_minute")
+    if timestamp:
+        minute_label = f"minute {start_minute}" if start_minute is not None else "video"
+        return f"video: {filename} @ {timestamp} ({minute_label})"
+    pages = result.get("page_numbers")
+    if pages:
+        return f"file: {filename}, pages: {pages}"
+    return f"file: {filename}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -240,7 +254,7 @@ def ask_stream(query: str, history: list):
     # Build context from top-k results
     context_blocks = "\n\n".join(
         f"**[{i+1}]** (score {r.get('rerank_score', 0):.3f}, "
-        f"file: {r.get('filename', '?')})\n{r.get('chunk_text', '')}"
+        f"{_format_source(r)})\n{r.get('chunk_text', '')}"
         for i, r in enumerate(result["results"])
     )
     print(f"[ASK] Context built ({len(context_blocks)} chars). Calling LLM…")
@@ -248,7 +262,8 @@ def ask_stream(query: str, history: list):
     system_msg = (
         "You are a precise, helpful assistant. "
         "Answer the question using ONLY the provided context. "
-        "Cite the numbered passages when relevant."
+        "Cite the numbered passages when relevant. "
+        "When a passage has a video timestamp, include the minute or timestamp in the answer."
     )
     user_msg = f"Context:\n{context_blocks}\n\nQuestion: {query}"
 
@@ -314,7 +329,11 @@ with gr.Blocks(
         file_input = gr.Files(
             label="Drop files here",
             file_count="multiple",
-            file_types=[".pdf", ".docx", ".txt"],
+            file_types=[
+                ".pdf", ".docx", ".txt",
+                ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v",
+                ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg",
+            ],
         )
         ingest_btn = gr.Button("🚀  Start Ingestion", variant="primary", size="lg")
         ingest_log = gr.Markdown(

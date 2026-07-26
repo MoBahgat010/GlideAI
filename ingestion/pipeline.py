@@ -3,7 +3,7 @@ Ingestion pipeline — idempotent, multimodal, batched.
 
 Flow:
   1. Download files from object storage → temp dir
-  2. Batch-load PDFs with OpenDataLoaderPDFLoader (single call)
+  2. Parse documents or transcribe media with Rev AI STT
   3. Process each document with DocumentChunker → text + image + caption records
   4. Embed text/caption records with jina-clip-v2 text tower
   5. Embed image records with jina-clip-v2 image tower
@@ -19,6 +19,7 @@ from typing import Callable
 import rag_config as cfg
 
 from ingestion.loader import PDFLoader
+from ingestion.stt import RevAITranscriber, is_media_file
 from ingestion.chunking import DocumentChunker
 from ingestion.embedding import MultimodalEncoder
 from storage.object_storage import ObjectStorage
@@ -44,12 +45,14 @@ class IngestionPipeline:
         encoder: MultimodalEncoder,
         chunker: DocumentChunker,
         loader: PDFLoader,
+        transcriber: RevAITranscriber | None = None,
     ):
         self.storage = storage
         self.vdb = vdb
         self.encoder = encoder
         self.chunker = chunker
         self.loader = loader
+        self.transcriber = transcriber
 
     def run_pipeline(
         self,
@@ -87,13 +90,20 @@ class IngestionPipeline:
                 self.storage.download(key, local)
                 logger.info("Downloaded %s → %s (%d bytes)", key, local, local.stat().st_size)
 
-                # ── Parse entire file directly (Temporary single-step) ──────────
-                emit("PARSING", f"File {file_idx+1}/{total_files}: Parsing document…", base_pct + pct_step * 0.10)
+                is_media = is_media_file(local)
+                stage = "STT" if is_media else "PARSING"
+                action = "Transcribing media with Rev AI" if is_media else "Parsing document"
+                emit(stage, f"File {file_idx+1}/{total_files}: {action}…", base_pct + pct_step * 0.10)
                 
                 try:
-                    documents = self.loader.load([str(local)])
+                    if is_media:
+                        if self.transcriber is None:
+                            raise RuntimeError("No STT transcriber configured for media ingestion.")
+                        documents = self.transcriber.load([str(local)])
+                    else:
+                        documents = self.loader.load([str(local)])
                 except Exception as e:
-                    logger.error("Docling failed: %s", e)
+                    logger.error("%s failed for %s: %s", stage, key, e)
                     documents = None
                     
                 if not documents:

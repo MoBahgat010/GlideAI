@@ -2,7 +2,7 @@
 Celery tasks for the multimodal RAG pipeline.
 
 run_ingestion:
-  Downloads → parses → chunks → embeds (dual-tower) → upserts to Pinecone.
+  Downloads → parses/STT-transcribes → chunks → embeds → upserts to Pinecone.
   Reports stage progress via Celery's update_state for live Gradio streaming.
 """
 
@@ -14,6 +14,7 @@ from pathlib import Path
 from ingestion.embedding import MultimodalEncoder, JinaClipTextEmbeddings
 from ingestion.chunking import DocumentChunker
 from ingestion.loader import PDFLoader
+from ingestion.stt import RevAITranscriber
 from ingestion.pipeline import IngestionPipeline
 from storage.object_storage import ObjectStorage
 from storage.pinecone import PineconeVDB
@@ -73,6 +74,11 @@ def run_ingestion(self, job_id: str, storage_keys: list[str]) -> dict:
     )
 
     loader = PDFLoader(hybrid_url=cfg.HYBRID_URL, image_dir=cfg.IMAGE_DIR)
+    transcriber = RevAITranscriber(
+        access_token=cfg.REV_AI,
+        poll_seconds=cfg.REV_AI_POLL_SECONDS,
+        max_segment_seconds=cfg.STT_SEGMENT_SECONDS,
+    )
 
     pipeline = IngestionPipeline(
         storage=storage,
@@ -80,6 +86,7 @@ def run_ingestion(self, job_id: str, storage_keys: list[str]) -> dict:
         encoder=encoder,
         chunker=chunker,
         loader=loader,
+        transcriber=transcriber,
     )
 
     # ── Progress callback → Celery state updates ─────────────────────────────

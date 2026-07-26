@@ -1,3 +1,9 @@
 .env
 *.pdf
 *.jsonl
+
+ingested_images
+
+reference
+
+uploads

@@ -37,6 +37,11 @@ EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
 # ── OpenDataLoader ────────────────────────────────────────────────────────────
 HYBRID_URL = os.getenv("HYBRID_URL", "http://localhost:5002")
 
+# ── Rev AI Speech-to-Text ─────────────────────────────────────────────────────
+REV_AI = os.getenv("REV_AI")
+REV_AI_POLL_SECONDS = int(os.getenv("REV_AI_POLL_SECONDS", "10"))
+STT_SEGMENT_SECONDS = int(os.getenv("STT_SEGMENT_SECONDS", "60"))
+
 # ── Celery / Redis ────────────────────────────────────────────────────────────
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 

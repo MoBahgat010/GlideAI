@@ -40,6 +40,7 @@ _TEXT_TYPES = {
     "list item",
     "list_item",
     "footnote",
+    "transcript",
 }
 
 
@@ -161,6 +162,8 @@ class DocumentChunker:
                         "page_number": el.get("page number", el.get("page_number", 0)) + page_offset,
                         "bbox": el.get("bounding box", el.get("bbox", [])),
                         "type": el_type,
+                        "start_time": el.get("start_time"),
+                        "end_time": el.get("end_time"),
                     })
 
         logger.info(
@@ -220,9 +223,10 @@ class DocumentChunker:
         for i, doc in enumerate(lc_docs):
             chunk_text = doc.page_content
             # Find which pages/bboxes this chunk spans
-            page_numbers, bboxes = self._find_span_metadata(
+            page_numbers, bboxes, start_time, end_time = self._find_span_metadata(
                 chunk_text, full_text, seg_boundaries
             )
+            video_timestamp = self._format_time_range(start_time, end_time)
 
             record_id = _deterministic_id(source_key, "text", i)
             records.append({
@@ -239,6 +243,11 @@ class DocumentChunker:
                     "char_count": len(chunk_text),
                     "page_numbers": page_numbers,
                     "bboxes": bboxes,
+                    "video_start_seconds": start_time,
+                    "video_end_seconds": end_time,
+                    "video_start_minute": int(start_time // 60) if start_time is not None else None,
+                    "video_end_minute": int(end_time // 60) if end_time is not None else None,
+                    "video_timestamp": video_timestamp,
                     "ingestion_job_id": job_id,
                     "chunk_text": chunk_text[:1000],
                     "linked_image_id": None,
@@ -408,7 +417,7 @@ class DocumentChunker:
         chunk_text: str,
         full_text: str,
         seg_boundaries: list[tuple[int, int, dict]],
-    ) -> tuple[list[int], list[list]]:
+    ) -> tuple[list[int], list[list], float | None, float | None]:
         """
         Given a chunk's text, find it in full_text and return
         which pages and bounding boxes it spans.
@@ -418,13 +427,15 @@ class DocumentChunker:
             # Fallback: try first 200 chars
             idx = full_text.find(chunk_text[:200])
         if idx < 0:
-            return [], []
+            return [], [], None, None
 
         chunk_start = idx
         chunk_end = idx + len(chunk_text)
 
         pages: list[int] = []
         bboxes: list[list] = []
+        start_times: list[float] = []
+        end_times: list[float] = []
         for seg_start, seg_end, seg_meta in seg_boundaries:
             if seg_start < chunk_end and seg_end > chunk_start:
                 page = seg_meta.get("page_number", 0)
@@ -433,7 +444,33 @@ class DocumentChunker:
                 bbox = seg_meta.get("bbox", [])
                 if bbox:
                     bboxes.append(bbox)
-        return pages, bboxes
+                if seg_meta.get("start_time") is not None:
+                    start_times.append(float(seg_meta["start_time"]))
+                if seg_meta.get("end_time") is not None:
+                    end_times.append(float(seg_meta["end_time"]))
+        return (
+            pages,
+            bboxes,
+            min(start_times) if start_times else None,
+            max(end_times) if end_times else None,
+        )
+
+    @staticmethod
+    def _format_time_range(start_time: float | None, end_time: float | None) -> str | None:
+        if start_time is None:
+            return None
+
+        def fmt(seconds: float) -> str:
+            total = max(0, int(seconds))
+            minutes, secs = divmod(total, 60)
+            hours, minutes = divmod(minutes, 60)
+            if hours:
+                return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+            return f"{minutes:02d}:{secs:02d}"
+
+        if end_time is None or int(end_time) == int(start_time):
+            return fmt(start_time)
+        return f"{fmt(start_time)}-{fmt(end_time)}"
 
     @staticmethod
     def _find_caption(
