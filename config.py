@@ -52,7 +52,7 @@ LOCAL_API_KEY = os.getenv("LOCAL_API_KEY", "local")
 # Embeddings
 # --------------------------------------------------------------------------
 EMBEDDING_MODEL = require_env("EMBEDDING_MODEL")
-EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")
+EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cuda")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
 # --------------------------------------------------------------------------
