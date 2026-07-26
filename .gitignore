@@ -1,9 +1,7 @@
 .env
 *.pdf
 *.jsonl
-
 ingested_images
-
 reference
-
 uploads
+__pycache__

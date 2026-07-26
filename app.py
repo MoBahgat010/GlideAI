@@ -23,6 +23,9 @@ from ingestion.embedding import MultimodalEncoder
 from retrieval.pipeline import RetrievalPipeline
 from tasks import celery_app, run_ingestion as celery_run_ingestion  # noqa: F401
 
+from agent.workflow import CoodingAgent
+from langchain_core.messages import HumanMessage
+
 # ── Logging ─────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -168,15 +171,13 @@ def upload_and_ingest(files):
 #  TAB 2 — Ask
 # ══════════════════════════════════════════════════════════════════════════════
 
-def ask_stream(query: str, history: list):
-    """
-    Generator for the chatbot:
-      1. Show retrieval stage progress in the last message bubble (streamed live)
-      2. Stream the final answer token by token
-    """
-    import queue
-    import threading
+coding_agent = CoodingAgent()
 
+async def ensure_agent_ready():
+    if coding_agent.coding_agent is None:
+        await coding_agent.init_agent()
+
+async def agent_stream(query: str, history: list):
     if not query.strip():
         yield history, "", "", ""
         return
@@ -187,111 +188,23 @@ def ask_stream(query: str, history: list):
 
     history = list(history or [])
     history.append({"role": "user", "content": query})
-    history.append({"role": "assistant", "content": "⏳ Retrieving…"})
+    history.append({"role": "assistant", "content": "⏳ Thinking..."})
     yield history, "", "", ""
 
-    stage_log: list[str] = []
-    result_holder: list[dict] = []
-    progress_queue: queue.Queue = queue.Queue()
+    await ensure_agent_ready()
 
-    def on_progress(stage: str, msg: str):
-        print(f"[PROGRESS] {stage}: {msg}")
-        stage_log.append(f"{_icon(stage)} **{stage}** — {msg}")
-        progress_queue.put(("progress", "\n".join(stage_log)))
-
-    def run_retrieval():
-        print("[RETRIEVAL] Thread started")
-        try:
-            pipeline = get_retrieval_pipeline()
-            result = pipeline.retrieve(query, progress=on_progress)
-            print(f"[RETRIEVAL] Done. {len(result.get('results', []))} results returned.")
-            result_holder.append(result)
-        except Exception as exc:
-            import traceback
-            print(f"[RETRIEVAL ERROR] {exc}")
-            traceback.print_exc()
-            result_holder.append({"error": str(exc)})
-        finally:
-            print("[RETRIEVAL] Thread finishing, sending 'done' signal")
-            progress_queue.put(("done", None))
-
-    thread = threading.Thread(target=run_retrieval, daemon=True)
-    thread.start()
-    print("[ASK] Retrieval thread launched, waiting for progress…")
-
-    # Stream progress updates while retrieval runs
-    while True:
-        msg_type, payload = progress_queue.get()
-        if msg_type == "progress":
-            print(f"[QUEUE] Progress update received, yielding to Gradio")
-            history[-1]["content"] = payload
+    try:
+        async for chunk in coding_agent.arun([HumanMessage(content=query)]):
+            if history[-1]["content"] == "⏳ Thinking...":
+                history[-1]["content"] = chunk
+            else:
+                history[-1]["content"] += chunk
             yield history, "", "", ""
-        elif msg_type == "done":
-            print("[QUEUE] 'done' signal received, exiting progress loop")
-            break
-
-    thread.join()
-    print("[ASK] Thread joined")
-
-    if not result_holder:
-        print("[ASK] ERROR: result_holder is empty!")
-        history[-1]["content"] = "❌ Retrieval returned no result."
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        history[-1]["content"] += f"\n\n❌ Error: {str(e)}"
         yield history, "", "", ""
-        return
-
-    if "error" in result_holder[0]:
-        print(f"[ASK] ERROR from retrieval: {result_holder[0]['error']}")
-        history[-1]["content"] = f"❌ Retrieval error: {result_holder[0]['error']}"
-        yield history, "", "", ""
-        return
-
-    result = result_holder[0]
-    print(f"[ASK] rewritten_query: {result['rewritten_query']!r}")
-    print(f"[ASK] hyde_passage (first 100 chars): {result['hyde_passage'][:100]!r}")
-    print(f"[ASK] {len(result['results'])} reranked results")
-    yield history, result["rewritten_query"], result["hyde_passage"], ""
-
-    # Build context from top-k results
-    context_blocks = "\n\n".join(
-        f"**[{i+1}]** (score {r.get('rerank_score', 0):.3f}, "
-        f"{_format_source(r)})\n{r.get('chunk_text', '')}"
-        for i, r in enumerate(result["results"])
-    )
-    print(f"[ASK] Context built ({len(context_blocks)} chars). Calling LLM…")
-
-    system_msg = (
-        "You are a precise, helpful assistant. "
-        "Answer the question using ONLY the provided context. "
-        "Cite the numbered passages when relevant. "
-        "When a passage has a video timestamp, include the minute or timestamp in the answer."
-    )
-    user_msg = f"Context:\n{context_blocks}\n\nQuestion: {query}"
-
-    pipeline = get_retrieval_pipeline()
-    print(f"[LLM] Streaming answer with model: {cfg.HEAVY_WEIGHT_MODEL}")
-    stream = pipeline.nvidia_client.chat.completions.create(
-        model=cfg.HEAVY_WEIGHT_MODEL,
-        messages=[
-            {"role": "system",  "content": system_msg},
-            {"role": "user",    "content": user_msg},
-        ],
-        stream=True,
-        max_tokens=1024,
-        temperature=0.2,
-    )
-
-    answer = ""
-    token_count = 0
-    for chunk in stream:
-        delta  = chunk.choices[0].delta.content or ""
-        answer += delta
-        token_count += 1
-        if token_count % 20 == 0:
-            print(f"[LLM] ...streamed {token_count} tokens so far")
-        history[-1]["content"] = answer
-        yield history, result["rewritten_query"], result["hyde_passage"], context_blocks
-    print(f"[LLM] Stream complete. Total tokens: {token_count}")
-
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -378,12 +291,12 @@ with gr.Blocks(
             context_box    = gr.Textbox(label="Top-5 context chunks", lines=12, interactive=False)
 
         ask_btn.click(
-            fn=ask_stream,
+            fn=agent_stream,
             inputs=[query_box, chatbot],
             outputs=[chatbot, rewritten_box, hyde_box, context_box],
         )
         query_box.submit(
-            fn=ask_stream,
+            fn=agent_stream,
             inputs=[query_box, chatbot],
             outputs=[chatbot, rewritten_box, hyde_box, context_box],
         )
