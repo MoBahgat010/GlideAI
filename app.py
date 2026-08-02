@@ -16,9 +16,9 @@ from openai import OpenAI
 
 import logging
 
-import rag_config as cfg
+from config import *
 from storage.object_storage import ObjectStorage
-from storage.pinecone import PineconeVDB
+from storage.weaviate import WeaviateVDB
 from ingestion.embedding import MultimodalEncoder
 from retrieval.pipeline import RetrievalPipeline
 from tasks import celery_app, run_ingestion as celery_run_ingestion  # noqa: F401
@@ -34,7 +34,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-storage = ObjectStorage(s3_uri=cfg.S3_URI, local_dir=cfg.UPLOAD_DIR)
+storage = ObjectStorage(s3_uri=S3_URI, local_dir=UPLOAD_DIR)
 
 _retrieval_pipeline = None
 
@@ -51,18 +51,19 @@ def get_retrieval_pipeline():
         from retrieval.reranker import HybridReranker
         pre_loaded_reranker = HybridReranker()
         
-        encoder = MultimodalEncoder(device=cfg.EMBEDDING_DEVICE)
-        vdb = PineconeVDB(cfg.PINECONE_API_KEY, cfg.PINECONE_INDEX_NAME, encoder.get_dimension())
-        nvidia_client = OpenAI(api_key=cfg.NVIDIA_API_KEY, base_url=cfg.NVIDIA_BASE_URL)
+        encoder = MultimodalEncoder(device=EMBEDDING_DEVICE)
+        index_name = PINECONE_INDEX_NAME
+        vdb = WeaviateVDB(WEAVIATE_REST_ENDPOINT, WEAVIATE_API_KEY, index_name, encoder.get_dimension())
+        nvidia_client = OpenAI(api_key=NVIDIA_API_KEY, base_url=NVIDIA_BASE_URL)
         
         _retrieval_pipeline = RetrievalPipeline(
             encoder=encoder,
             vdb=vdb,
             nvidia_client=nvidia_client,
-            light_model=cfg.LIGHT_WEIGHT_MODEL,
-            heavy_model=cfg.HEAVY_WEIGHT_MODEL,
-            retrieve_top_k=cfg.RETRIEVE_TOP_K,
-            rerank_top_k=cfg.RERANK_TOP_K,
+            light_model=LIGHT_WEIGHT_MODEL,
+            heavy_model=HEAVY_WEIGHT_MODEL,
+            retrieve_top_k=RETRIEVE_TOP_K,
+            rerank_top_k=RERANK_TOP_K,
             reranker=pre_loaded_reranker,
         )
     return _retrieval_pipeline

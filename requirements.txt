@@ -9,8 +9,8 @@ langchain-huggingface>=0.0.3
 langchain-experimental>=0.0.60   # SemanticChunker
 langchain-opendataloader-pdf     # OpenDataLoaderPDFLoader (PDF parsing)
 
-# ── Pinecone ──────────────────────────────────────────────────────────────────
-pinecone>=3.0
+# ── Weaviate ──────────────────────────────────────────────────────────────────
+weaviate-client>=3.24
 
 # ── Celery + Redis ────────────────────────────────────────────────────────────
 celery[redis]>=5.3
@@ -22,8 +22,11 @@ openai>=1.30
 # ── Rev AI Speech-to-Text ─────────────────────────────────────────────────────
 rev_ai>=2.21
 
-# ── Gradio ────────────────────────────────────────────────────────────────────
-gradio>=4.40
+# ── FastAPI server ───────────────────────────────────────────────────────────
+fastapi>=0.111
+uvicorn[standard]>=0.30
+aiofiles>=23.2
+python-multipart>=0.0.9
 
 # ── BM25 ──────────────────────────────────────────────────────────────────────
 rank-bm25>=0.2

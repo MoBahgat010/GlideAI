@@ -1,26 +1,24 @@
 """
-Retrieval pipeline for the multimodal RAG engine.
+Retrieval pipeline — Weaviate hybrid search + cross-encoder rerank + caption enrichment (Async).
 
-Full flow:
-  1. Query rewrite (light LLM) + HyDE (heavy LLM) — in parallel
-  2. Embed original / rewritten / HyDE queries via jina-clip-v2 text tower
-  3. Query Pinecone with each vector (top_k=30) — in parallel, deduplicate
-  4. Hybrid rerank (cross-encoder + BM25) → top 5
-  5. Enrich results: follow linked_image_id / linked_text_id cross-references
-
-Compatible with the ingestion pipeline: both use the same jina-clip-v2
-text tower, producing vectors in the same 1024-dim shared space.
+Flow:
+  1. Expand query (rewrite + HyDE) in 1 SINGLE call to local LLM using QueryRewriteAndHyDE Pydantic model
+  2. Embed all three variants via jina-clip-v2 text tower
+  3. Hybrid query Weaviate (BM25 + dense vector, alpha=0.5) × 3 in parallel with asyncio.gather
+  4. Cross-encoder + BM25 rerank → top-k
+  5. Enrich: for every caption result fetch its linked image; for every image
+     result attach any caption that references it
 """
 
+import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from ingestion.embedding import MultimodalEncoder
-from storage.pinecone import PineconeVDB
-from .query_rewriter import QueryRewriter, HyDEGenerator
+from storage.weaviate import WeaviateVDB
+from .query_rewriter import SingleCallQueryExpander, QueryRewriteAndHyDE
 from .reranker import HybridReranker
 
 logger = logging.getLogger("retrieval.pipeline")
@@ -30,109 +28,103 @@ Progress = Callable[[str, str], None]   # (stage, message)
 
 class RetrievalPipeline:
     """
-    Full retrieval pipeline with multimodal support.
-
-    At query time, a single text query vector naturally retrieves
-    whichever hit — text chunk, image, or caption — ranks highest
-    in the shared embedding space. Linked content is fetched for
-    context/display.
+    Full multimodal retrieval pipeline using single-call Pydantic query expansion
+    and asyncio.gather for parallel Weaviate hybrid retrieval.
     """
 
     def __init__(
         self,
         encoder: MultimodalEncoder,
-        vdb: PineconeVDB,
-        nvidia_client: OpenAI,
-        light_model: str,
-        heavy_model: str,
+        vdb: WeaviateVDB,
+        local_client: AsyncOpenAI,
+        local_model: str = "default",
         retrieve_top_k: int = 30,
         rerank_top_k: int = 5,
         reranker: HybridReranker | None = None,
     ):
         self.encoder = encoder
         self.vdb = vdb
-        self.nvidia_client = nvidia_client
-        self.rewriter = QueryRewriter(nvidia_client, light_model)
-        self.hyde = HyDEGenerator(nvidia_client, heavy_model)
+        self.expander = SingleCallQueryExpander(local_client, local_model)
         self.reranker = reranker or HybridReranker()
         self.retrieve_top_k = retrieve_top_k
         self.rerank_top_k = rerank_top_k
 
-    def retrieve(self, query: str, progress: Progress | None = None) -> dict:
+    async def retrieve(self, query: str, progress: Progress | None = None) -> dict:
         """
-        Run the full retrieval pipeline.
+        Run the full retrieval pipeline asynchronously.
 
         Returns
         -------
-        dict
-            Keys: query, rewritten_query, hyde_passage, results.
-            Each result contains metadata with type, page_numbers, bboxes,
-            image_path (if image), and linked content.
+        dict with keys: ``query``, ``rewritten_query``, ``hyde_passage``, ``results``.
         """
         def emit(stage: str, msg: str):
+            logger.info("[%s] %s", stage, msg)
             if progress:
                 progress(stage, msg)
 
-        logger.info("Retrieval started — query: %r", query)
+        logger.info("Retrieval started — query=%r", query)
 
-        # ── 1. Rewrite + HyDE in parallel ─────────────────────────────────────
-        emit("REWRITING", "Rewriting query and generating HyDE passage…")
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            rw_fut = ex.submit(self.rewriter.rewrite, query)
-            hy_fut = ex.submit(self.hyde.generate, query)
-        rewritten = rw_fut.result()
-        hyde_passage = hy_fut.result()
-        logger.info("Rewritten: %r", rewritten[:120])
-        logger.info("HyDE (120 chars): %r", hyde_passage[:120])
-        emit("REWRITING", f"Rewritten: {rewritten[:120]}")
+        # ── 1. Single-call query rewrite + HyDE via local LLM & Pydantic ───────
+        emit("EXPANDING", "Expanding query (rewrite + HyDE) in 1 call to local LLM…")
+        expanded: QueryRewriteAndHyDE = await self.expander.expand(query)
+        rewritten = expanded.rewritten_query
+        hyde_passage = expanded.hyde_passage
 
-        # ── 2. Embed all three queries in one batch ────────────────────────────
+        logger.info("Rewritten query: %r", rewritten[:120])
+        logger.info("HyDE passage (120 ch): %r", hyde_passage[:120])
+
+        # ── 2. Embed three query variants in one batch ─────────────────────────
         emit("EMBEDDING", "Embedding original / rewritten / HyDE queries…")
-        orig_vec, rw_vec, hyde_vec = self.encoder.encode_text(
-            [query, rewritten, hyde_passage]
+        orig_vec, rw_vec, hyde_vec = await asyncio.to_thread(
+            self.encoder.encode_text,
+            [query, rewritten, hyde_passage],
         )
+        logger.debug("Query vectors encoded (dim=%d)", len(orig_vec))
 
-        # ── 3. Retrieve from Pinecone in parallel, deduplicate ─────────────────
-        emit("RETRIEVING", f"Querying Pinecone (top_k={self.retrieve_top_k}) × 3…")
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            o_res = ex.submit(self.vdb.query, orig_vec, self.retrieve_top_k)
-            r_res = ex.submit(self.vdb.query, rw_vec,   self.retrieve_top_k)
-            h_res = ex.submit(self.vdb.query, hyde_vec, self.retrieve_top_k)
+        # ── 3. Hybrid search × 3 in parallel using asyncio.gather ─────────────
+        emit("RETRIEVING", f"Hybrid querying Weaviate × 3 with asyncio.gather (top_k={self.retrieve_top_k})…")
+        o_results, r_results, h_results = await asyncio.gather(
+            asyncio.to_thread(self.vdb.hybrid_query, query_text=query,        vector=orig_vec,  top_k=self.retrieve_top_k, alpha=0.5),
+            asyncio.to_thread(self.vdb.hybrid_query, query_text=rewritten,    vector=rw_vec,    top_k=self.retrieve_top_k, alpha=0.5),
+            asyncio.to_thread(self.vdb.hybrid_query, query_text=hyde_passage, vector=hyde_vec,  top_k=self.retrieve_top_k, alpha=0.5),
+        )
 
         seen: dict[str, dict] = {}
-        for result_list in [o_res.result(), r_res.result(), h_res.result()]:
+        for result_list in (o_results, r_results, h_results):
             for item in result_list:
-                if item["id"] not in seen or item["score"] > seen[item["id"]]["score"]:
-                    seen[item["id"]] = item
+                item_id = item.get("id")
+                if not item_id:
+                    continue
+                if item_id not in seen or item.get("score", 0) > seen[item_id].get("score", 0):
+                    seen[item_id] = item
+
         candidates = list(seen.values())
         logger.info("%d unique candidates after dedup", len(candidates))
-        emit("RETRIEVING", f"{len(candidates)} unique candidates after dedup.")
 
-        # Log record type distribution
         type_counts: dict[str, int] = {}
         for c in candidates:
-            rtype = c.get("type", "unknown")
-            type_counts[rtype] = type_counts.get(rtype, 0) + 1
+            t = c.get("type", "unknown")
+            type_counts[t] = type_counts.get(t, 0) + 1
         logger.info("Candidate types: %s", type_counts)
+        emit("RETRIEVING", f"{len(candidates)} candidates — types: {type_counts}")
 
-        # ── 4. Hybrid rerank → top 5 ───────────────────────────────────────────
-        emit("RERANKING", f"Reranking with cross-encoder + BM25 → top {self.rerank_top_k}…")
-        top_results = self.reranker.rerank(query, candidates, top_k=self.rerank_top_k)
-        emit("RERANKING", f"Done. Returning {len(top_results)} results.")
-
-        # ── 5. Enrich: follow linked content ───────────────────────────────────
-        self._enrich_linked_content(top_results)
-
-        logger.info(
-            "Retrieval complete — %d results returned", len(top_results)
+        # ── 4. Rerank ──────────────────────────────────────────────────────────
+        emit("RERANKING", f"Reranking → top {self.rerank_top_k}…")
+        top_results = await asyncio.to_thread(
+            self.reranker.rerank, query, candidates, top_k=self.rerank_top_k
         )
+        logger.info("Rerank complete — %d results", len(top_results))
         for i, r in enumerate(top_results):
             logger.debug(
-                "  result[%d]: type=%s, score=%.4f, pages=%s",
-                i, r.get("type", "?"), r.get("rerank_score", 0),
-                r.get("page_numbers", []),
+                "  [%d] type=%-10s score=%.4f id=%s",
+                i, r.get("type", "?"), r.get("rerank_score", 0), r.get("id", "?"),
             )
 
+        # ── 5. Enrich linked content ───────────────────────────────────────────
+        emit("ENRICHING", "Fetching linked images/captions…")
+        await asyncio.to_thread(self._enrich_linked_content, top_results, candidates)
+
+        logger.info("Retrieval complete — returning %d results", len(top_results))
         return {
             "query": query,
             "rewritten_query": rewritten,
@@ -140,33 +132,53 @@ class RetrievalPipeline:
             "results": top_results,
         }
 
-    def _enrich_linked_content(self, results: list[dict]) -> None:
+    def _enrich_linked_content(
+        self,
+        results: list[dict],
+        all_candidates: list[dict],
+    ) -> None:
         """
-        For each result, fetch any linked content (image↔caption pairs)
-        from Pinecone and attach it to the result dict.
+        Cross-enrich caption↔image pairs in top results.
         """
-        linked_ids: list[str] = []
+        candidate_map: dict[str, dict] = {c["id"]: c for c in all_candidates if c.get("id")}
+        caption_by_image: dict[str, dict] = {
+            c["linked_image_id"]: c
+            for c in all_candidates
+            if c.get("type") == "caption" and c.get("linked_image_id")
+        }
+
+        ids_to_fetch: list[str] = []
         for r in results:
-            lid = r.get("linked_image_id") or r.get("linked_text_id")
-            if lid:
-                linked_ids.append(lid)
+            if r.get("type") == "caption":
+                lid = r.get("linked_image_id")
+                if lid and lid not in candidate_map:
+                    ids_to_fetch.append(lid)
 
-        if not linked_ids:
-            return
-
-        linked_records = self.vdb.fetch_batch(linked_ids)
-        linked_map = {rec["id"]: rec for rec in linked_records}
+        fetched: dict[str, dict] = {}
+        if ids_to_fetch:
+            logger.info("Fetching %d linked image records from Weaviate", len(ids_to_fetch))
+            fetched = {
+                rec["id"]: rec
+                for rec in self.vdb.fetch_batch(ids_to_fetch)
+                if rec.get("id")
+            }
 
         for r in results:
-            if r.get("linked_image_id") and r["linked_image_id"] in linked_map:
-                r["linked_image"] = linked_map[r["linked_image_id"]]
-                logger.debug(
-                    "Enriched result %s with linked image %s",
-                    r["id"], r["linked_image_id"],
-                )
-            elif r.get("linked_text_id") and r["linked_text_id"] in linked_map:
-                r["linked_text"] = linked_map[r["linked_text_id"]]
-                logger.debug(
-                    "Enriched result %s with linked text %s",
-                    r["id"], r["linked_text_id"],
-                )
+            rtype = r.get("type")
+            rid = r.get("id")
+
+            if rtype == "caption":
+                lid = r.get("linked_image_id")
+                if lid:
+                    linked = candidate_map.get(lid) or fetched.get(lid)
+                    if linked:
+                        r["linked_image"] = linked
+                        logger.debug("Caption %s → linked image %s attached", rid, lid)
+                    else:
+                        logger.debug("Caption %s: linked image %s not found", rid, lid)
+
+            elif rtype == "image":
+                caption = caption_by_image.get(rid)
+                if caption:
+                    r["linked_caption"] = caption
+                    logger.debug("Image %s → linked caption %s attached", rid, caption.get("id"))

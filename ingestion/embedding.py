@@ -2,8 +2,8 @@
 Multimodal encoder using jinaai/jina-clip-v2.
 
 Dual-tower architecture:
-  - Text tower  → model.get_text_features()  → 1024-dim normalised vector
-  - Image tower → model.get_image_features() → 1024-dim normalised vector
+  - Text tower  → model.get_text_features()  → d_model-dim normalised vector
+  - Image tower → model.get_image_features() → d_model-dim normalised vector
 
 Both towers share the same embedding space, so text and image vectors
 are directly comparable via cosine similarity in Pinecone.
@@ -33,9 +33,10 @@ class MultimodalEncoder(nn.Module):
     Supports batched encoding for both text and images.
     """
 
-    def __init__(self, device: str | None = None, d_model: int = 1024):
+    def __init__(self, device: str | None = None, d_model: int = 1024, batch_size: int = 64):
         super().__init__()
         self.d_model = d_model
+        self.batch_size = batch_size
         requested_device = (device or "").strip().lower() if device else ""
         if requested_device in {"cuda", "cuda:0", "cpu"}:
             self.device = requested_device
@@ -72,19 +73,20 @@ class MultimodalEncoder(nn.Module):
     # ── public API ────────────────────────────────────────────────────────────
 
     def get_dimension(self) -> int:
-        """Return the embedding dimension (1024)."""
+        """Return the embedding dimension."""
         return self.d_model
 
     @torch.no_grad()
     def encode_text(
-        self, texts: list[str], batch_size: int = 4
+        self, texts: list[str], batch_size: int = 64
     ) -> list[list[float]]:
         """
         Encode a list of texts via the text tower.
 
-        Returns a list of 1024-dim normalised vectors (as plain Python lists).
-        Processes in small batches to manage VRAM/RAM (jina-clip-v2 supports up to 8192 context length, which can cause OOM with large batches).
+        Returns a list of ``d_model``-dim normalised vectors (as plain Python lists).
+        Processes in small batches to manage VRAM/RAM.
         """
+        batch_size = batch_size or self.batch_size
         safe_texts = [t if (t and t.strip()) else " " for t in texts]
         all_embeddings: list[list[float]] = []
 
@@ -134,14 +136,15 @@ class MultimodalEncoder(nn.Module):
 
     @torch.no_grad()
     def encode_image(
-        self, images: list[Image.Image], batch_size: int = 2
+        self, images: list[Image.Image], batch_size: int = 64
     ) -> list[list[float]]:
         """
         Encode a list of PIL Images via the image tower.
 
-        Returns a list of 1024-dim normalised vectors (as plain Python lists).
-        Uses a very small default batch_size because images consume high VRAM.
+        Returns a list of ``d_model``-dim normalised vectors (as plain Python lists).
+        Uses a small default batch_size because images consume high VRAM.
         """
+        batch_size = batch_size or max(1, self.batch_size // 2)
         all_embeddings: list[list[float]] = []
 
         for start in range(0, len(images), batch_size):

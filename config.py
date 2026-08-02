@@ -1,89 +1,65 @@
 """
-Shared configuration and client setup for the GraphRAG pipeline.
-Imported by both ingest.py and app.py so settings stay in one place.
+RAG pipeline configuration — Pinecone, NVIDIA NIM, Redis, object storage.
+Independent of the old GraphRAG / Neo4j config.py.
 """
 
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_neo4j import Neo4jGraph
-from langchain_openai import ChatOpenAI
 
 BASE_DIR = Path(__file__).resolve().parent
-ARTIFACT_DIR = BASE_DIR / "artifacts" / "graphrag"
-BATCH_DIR = ARTIFACT_DIR / "batch_jobs"
-
 load_dotenv(BASE_DIR / ".env", override=True)
-load_dotenv(override=True)
 
 
-def require_env(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise ValueError(f"Set {name} in your .env before running this script.")
-    return value
+def _require(name: str) -> str:
+    v = os.getenv(name)
+    if not v:
+        raise EnvironmentError(f"Missing required env var: {name}")
+    return v
 
 
-# --------------------------------------------------------------------------
-# Neo4j
-# --------------------------------------------------------------------------
-NEO4J_URI = require_env("NEO4J_URI")
-NEO4J_USERNAME = require_env("NEO4J_USERNAME")
-NEO4J_PASSWORD = require_env("NEO4J_PASSWORD")
+# ── Pinecone ──────────────────────────────────────────────────────────────────
+PINECONE_API_KEY = _require("PINECONE_API_KEY")
+PINECONE_INDEX_NAME = os.getenv("INDEX_NAME", "rag-pipeline")
 
-# --------------------------------------------------------------------------
-# Gemini — used ONLY for the batch extraction job in ingest.py
-# --------------------------------------------------------------------------
-GEMINI_API_KEY = require_env("GEMINI_API_KEY")
-GOOGLE_API_KEY = GEMINI_API_KEY
-EXTRACTION_MODEL = os.getenv("EXTRACTION_MODEL", "gemini-2.5-flash")
-GEMINI_EXTRACTION_MODEL = EXTRACTION_MODEL
+# ── NVIDIA NIM ────────────────────────────────────────────────────────────────
+NVIDIA_API_KEY = _require("NVIDIA_API_KEY")
+NVIDIA_BASE_URL = os.getenv("BASE_URL", "https://integrate.api.nvidia.com/v1")
+LOCAL_LLM_URL = os.getenv("QWEN_SERVER_URL", "http://127.0.0.1:8080/v1")
+LIGHT_WEIGHT_MODEL = os.getenv("LIGHT_WEIGHT", "openai/gpt-oss-120b")
+HEAVY_WEIGHT_MODEL = os.getenv("HEAVY_WEIGHT", "thinkingmachines/inkling")
 
-# --------------------------------------------------------------------------
-# Local model — used for EVERYTHING else (summarizing communities, answering)
-# --------------------------------------------------------------------------
-LOCAL_MODEL = os.getenv("LOCAL_MODEL", "qwen2.5:14b-instruct")
-LOCAL_BASE_URL = os.getenv("QWEN_SERVER_URL", "http://127.0.0.1:11434/v1")
-LOCAL_API_KEY = os.getenv("LOCAL_API_KEY", "local")
-
-# --------------------------------------------------------------------------
-# Embeddings
-# --------------------------------------------------------------------------
-EMBEDDING_MODEL = require_env("EMBEDDING_MODEL")
+# ── Embeddings ────────────────────────────────────────────────────────────────
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "jinaai/jina-clip-v2")
 EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cuda")
-HF_TOKEN = os.getenv("HF_TOKEN")
+EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
 
-# --------------------------------------------------------------------------
-# Pipeline tuning
-# --------------------------------------------------------------------------
-MAX_CHARS_PER_CHUNK = int(os.getenv("MAX_CHARS_PER_CHUNK", "5000"))
-GDS_GRAPH_NAME = os.getenv("GDS_GRAPH_NAME", "entity_graph")
-COMMUNITY_PROPERTY = os.getenv("COMMUNITY_PROPERTY", "community_id")
-BATCH_POLL_SECONDS = int(os.getenv("BATCH_POLL_SECONDS", "20"))
-INDEX_NAME = os.getenv("INDEX_NAME", "graphrag")
-CHUNK_VECTOR_INDEX = f"{INDEX_NAME}_chunks"
-COMMUNITY_VECTOR_INDEX = f"{INDEX_NAME}_communities"
-UNSTRUCTURED_API_KEY = os.getenv("UNSTRUCTURED_API_KEY")
-FORBIDDEN_CHUNK_CATEGORIES = {"Header", "Footer"}
+# ── OpenDataLoader ────────────────────────────────────────────────────────────
+HYBRID_URL = os.getenv("HYBRID_URL", "http://localhost:5002")
 
-# --------------------------------------------------------------------------
-# Shared clients
-# --------------------------------------------------------------------------
+# ── Rev AI Speech-to-Text ─────────────────────────────────────────────────────
+REV_AI = os.getenv("REV_AI")
+REV_AI_POLL_SECONDS = int(os.getenv("REV_AI_POLL_SECONDS", "10"))
+STT_SEGMENT_SECONDS = int(os.getenv("STT_SEGMENT_SECONDS", "60"))
 
-# One LLM client, reused for community summarization (ingest.py) AND answering (app.py)
-local_llm = ChatOpenAI(
-    model=LOCAL_MODEL,
-    base_url=LOCAL_BASE_URL,
-    api_key=LOCAL_API_KEY,
-    temperature=0.2,
-)
+# ── Celery / Redis ────────────────────────────────────────────────────────────
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
-embeddings = HuggingFaceEmbeddings(
-    model_name=EMBEDDING_MODEL,
-    model_kwargs={"device": EMBEDDING_DEVICE},
-    encode_kwargs={"normalize_embeddings": True},
-)
+# ── Object storage ────────────────────────────────────────────────────────────
+S3_URI = os.getenv("S3_URI")                                   # None → disk
+UPLOAD_DIR_RAW = os.getenv("UPLOAD_DIR", "test")
+UPLOAD_DIR = str(BASE_DIR / UPLOAD_DIR_RAW) if not Path(UPLOAD_DIR_RAW).is_absolute() else UPLOAD_DIR_RAW
 
-graph = Neo4jGraph(url=NEO4J_URI, username=NEO4J_USERNAME, password=NEO4J_PASSWORD)
+IMAGE_DIR_RAW = os.getenv("IMAGE_DIR", "ingested_images")
+IMAGE_DIR = str(BASE_DIR / IMAGE_DIR_RAW) if not Path(IMAGE_DIR_RAW).is_absolute() else IMAGE_DIR_RAW
+
+# ── Pipeline tuning ───────────────────────────────────────────────────────────
+RETRIEVE_TOP_K = int(os.getenv("RETRIEVE_TOP_K", "30"))
+RERANK_TOP_K   = int(os.getenv("RERANK_TOP_K", "5"))
+EMBED_BATCH    = int(os.getenv("EMBED_BATCH", "64"))
+PDF_PAGE_CHUNK_SIZE = int(os.getenv("PDF_PAGE_CHUNK_SIZE", "2"))
+
+# ─ Weaviate ────────────────────────────────────────────────────────────────
+WEAVIATE_REST_ENDPOINT = os.getenv("WEAVIATE_REST_ENDPOINT")
+WEAVIATE_API_KEY = os.getenv("WEAVIATE_API_KEY")

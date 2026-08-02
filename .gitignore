@@ -5,3 +5,7 @@ ingested_images
 reference
 uploads
 __pycache__
+*.rdb
+test.ipynb
+output
+Extracted_Images

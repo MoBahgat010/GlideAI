@@ -1,47 +1,75 @@
 """
-Ingestion pipeline — idempotent, multimodal, batched.
+Ingestion pipeline — idempotent, multimodal, GPU-CPU pipelined.
 
 Flow:
-  1. Download files from object storage → temp dir
-  2. Parse documents or transcribe media with Rev AI STT
-  3. Process each document with DocumentChunker → text + image + caption records
-  4. Embed text/caption records with jina-clip-v2 text tower
-  5. Embed image records with jina-clip-v2 image tower
-  6. Upsert all records to Pinecone (idempotent via deterministic IDs)
+  1. Download all files in batch → temp dir
+  2. Batch parse all PDF files together via OpenDataLoader / transcribe media
+  3. Process each document with DocumentChunker → text + table + image + caption records
+  4. Patch caption linked_image_id → full Weaviate custom_id
+  5. Embed + upsert in overlapping GPU/CPU pipeline:
+       GPU encodes batch[n+1]  while  CPU upserts batch[n] to Weaviate
 """
 
+import gc
 import json
 import logging
 import tempfile
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
-import rag_config as cfg
-
-from ingestion.loader import PDFLoader
-from ingestion.stt import RevAITranscriber, is_media_file
+import config
+from config import EMBED_BATCH, EMBEDDING_DEVICE, EMBEDDING_MODEL
 from ingestion.chunking import DocumentChunker
 from ingestion.embedding import MultimodalEncoder
+from ingestion.loader import PDFLoader
+from ingestion.models import ParsedDocument
+from ingestion.stt import RevAITranscriber, is_media_file
 from storage.object_storage import ObjectStorage
-from storage.pinecone import PineconeVDB
+from storage.weaviate import WeaviateVDB
 
 logger = logging.getLogger("ingestion.pipeline")
 
-Progress = Callable[[str, str, float], None]  # (stage, message, pct 0-1)
+Progress = Callable[[str, str, float], None]  # (stage, message, pct)
+
+
+def _build_vec_record(key: str, rec, raw_vec: list[float], expected_dim: int) -> dict | None:
+    """Convert a chunk Document + raw embedding into a Weaviate upsert record."""
+    try:
+        vec = [float(v) for v in raw_vec]
+    except (TypeError, ValueError):
+        logger.warning("Non-numeric vector for %s::%s — skipping", key, rec.metadata.get("id"))
+        return None
+
+    if len(vec) != expected_dim:
+        logger.warning(
+            "Dimension mismatch for %s::%s: got %d expected %d — skipping",
+            key, rec.metadata.get("id"), len(vec), expected_dim,
+        )
+        return None
+
+    meta = {k: v for k, v in rec.metadata.items() if v is not None and k != "_vector"}
+    if "bbox" in meta:
+        meta["bbox"] = json.dumps(meta["bbox"])
+    if rec.page_content:
+        meta["chunk_text"] = rec.page_content
+
+    return {
+        "id": f"{key}::{rec.metadata['id']}",
+        "values": vec,
+        "metadata": meta,
+    }
 
 
 class IngestionPipeline:
     """
-    End-to-end ingestion: download → parse → chunk → embed → index.
-
-    Idempotent: deterministic chunk IDs mean re-running with the same
-    input produces the same records → Pinecone upsert is a no-op.
+    End-to-end ingestion with batch PDF parsing and GPU-CPU pipeline overlap.
     """
 
     def __init__(
         self,
         storage: ObjectStorage,
-        vdb: PineconeVDB,
+        vdb: WeaviateVDB,
         encoder: MultimodalEncoder,
         chunker: DocumentChunker,
         loader: PDFLoader,
@@ -54,6 +82,158 @@ class IngestionPipeline:
         self.loader = loader
         self.transcriber = transcriber
 
+    @classmethod
+    def from_config(cls) -> "IngestionPipeline":
+        """Build pipeline from application config."""
+        logger.info(
+            "Loading MultimodalEncoder (model=%s  device=%s  batch_size=%d)",
+            EMBEDDING_MODEL, EMBEDDING_DEVICE, EMBED_BATCH,
+        )
+        encoder = MultimodalEncoder(device=EMBEDDING_DEVICE, batch_size=EMBED_BATCH)
+
+        index_name = (
+            getattr(config, "INDEX_NAME", None)
+            or getattr(config, "PINECONE_INDEX_NAME", "RagPipeline")
+        )
+        logger.info(
+            "Connecting to Weaviate (endpoint=%s  class=%s  dim=%d)",
+            config.WEAVIATE_REST_ENDPOINT, index_name, encoder.get_dimension(),
+        )
+        vdb = WeaviateVDB(
+            endpoint=config.WEAVIATE_REST_ENDPOINT,
+            api_key=config.WEAVIATE_API_KEY,
+            index_name=index_name,
+            dimension=encoder.get_dimension(),
+        )
+
+        storage = ObjectStorage(s3_uri=config.S3_URI, local_dir=config.UPLOAD_DIR)
+        chunker = DocumentChunker()
+        loader = PDFLoader(image_dir=config.IMAGE_DIR)
+
+        transcriber = None
+        if getattr(config, "REV_AI", None):
+            transcriber = RevAITranscriber(
+                access_token=config.REV_AI,
+                poll_seconds=getattr(config, "REV_AI_POLL_SECONDS", 10),
+                max_segment_seconds=getattr(config, "STT_SEGMENT_SECONDS", 60),
+            )
+
+        return cls(
+            storage=storage,
+            vdb=vdb,
+            encoder=encoder,
+            chunker=chunker,
+            loader=loader,
+            transcriber=transcriber,
+        )
+
+    def _stream_text_embed_upsert(
+        self,
+        records: list,
+        key: str,
+        upsert_ex: ThreadPoolExecutor,
+        pending: Future | None,
+    ) -> tuple[int, Future | None]:
+        expected_dim = self.encoder.get_dimension()
+        batch_size = self.encoder.batch_size
+        total_upserted = 0
+
+        for start in range(0, len(records), batch_size):
+            batch = records[start : start + batch_size]
+            texts = [r.page_content for r in batch]
+
+            logger.info(
+                "[TEXT] Encoding batch %d-%d/%d (key=%s)",
+                start + 1, min(start + len(batch), len(records)), len(records), key,
+            )
+            raw_vecs = self.encoder.encode_text(texts)
+            logger.debug("[TEXT] Encoded %d vectors (dim=%d)", len(raw_vecs), len(raw_vecs[0]) if raw_vecs else 0)
+
+            weaviate_batch = []
+            for rec, raw_vec in zip(batch, raw_vecs):
+                rec_dict = _build_vec_record(key, rec, raw_vec, expected_dim)
+                if rec_dict:
+                    weaviate_batch.append(rec_dict)
+
+            del texts, raw_vecs
+            gc.collect()
+
+            if weaviate_batch:
+                if pending is not None:
+                    pending.result()
+
+                logger.info(
+                    "[TEXT] GPU→CPU hand-off: submitting %d vectors to Weaviate (start=%d)",
+                    len(weaviate_batch), start,
+                )
+                pending = upsert_ex.submit(self.vdb.upsert_batch, weaviate_batch)
+                total_upserted += len(weaviate_batch)
+
+        return total_upserted, pending
+
+    def _stream_image_embed_upsert(
+        self,
+        records: list,
+        key: str,
+        upsert_ex: ThreadPoolExecutor,
+        pending: Future | None,
+    ) -> tuple[int, Future | None]:
+        from PIL import Image as PILImage
+
+        expected_dim = self.encoder.get_dimension()
+        batch_size = max(1, self.encoder.batch_size // 2)
+        total_upserted = 0
+
+        for start in range(0, len(records), batch_size):
+            batch = records[start : start + batch_size]
+
+            pil_images: list = []
+            valid_recs: list = []
+            for r in batch:
+                path = r.metadata.get("image_path")
+                if path and Path(path).exists():
+                    try:
+                        img = PILImage.open(path).convert("RGB")
+                        pil_images.append(img)
+                        valid_recs.append(r)
+                    except Exception as exc:
+                        logger.warning("Cannot open image %s: %s", path, exc)
+
+            if not pil_images:
+                continue
+
+            logger.info(
+                "[IMAGE] Encoding batch %d-%d/%d (key=%s)",
+                start + 1, min(start + len(batch), len(records)), len(records), key,
+            )
+            raw_vecs = self.encoder.encode_image(pil_images)
+            logger.debug("[IMAGE] Encoded %d vectors", len(raw_vecs))
+
+            for img in pil_images:
+                img.close()
+
+            weaviate_batch = []
+            for rec, raw_vec in zip(valid_recs, raw_vecs):
+                rec_dict = _build_vec_record(key, rec, raw_vec, expected_dim)
+                if rec_dict:
+                    weaviate_batch.append(rec_dict)
+
+            del pil_images, raw_vecs, valid_recs
+            gc.collect()
+
+            if weaviate_batch:
+                if pending is not None:
+                    pending.result()
+
+                logger.info(
+                    "[IMAGE] GPU→CPU hand-off: submitting %d image vectors to Weaviate (start=%d)",
+                    len(weaviate_batch), start,
+                )
+                pending = upsert_ex.submit(self.vdb.upsert_batch, weaviate_batch)
+                total_upserted += len(weaviate_batch)
+
+        return total_upserted, pending
+
     def run_pipeline(
         self,
         storage_keys: list[str],
@@ -61,16 +241,16 @@ class IngestionPipeline:
         progress: Progress | None = None,
     ) -> dict:
         """
-        Run the full ingestion pipeline file-by-file to minimize memory usage.
+        Run the ingestion pipeline. Batch parses all PDF files together in a
+        single call to OpenDataLoader, then chunks, embeds, and upserts.
         """
-        import gc
-
         def emit(stage: str, msg: str, pct: float = 0.0):
+            logger.info("[%s] %.0f%% — %s", stage, pct * 100, msg)
             if progress:
                 progress(stage, msg, pct)
 
         total_files = len(storage_keys)
-        summary_stats = {
+        stats = {
             "text_records": 0,
             "image_records": 0,
             "caption_records": 0,
@@ -81,211 +261,105 @@ class IngestionPipeline:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
 
+            # ── 1. Download all files ──────────────────────────────────────────
+            local_files: list[tuple[str, Path, bool]] = []
             for file_idx, key in enumerate(storage_keys):
-                base_pct = file_idx / total_files
-                pct_step = 1.0 / total_files
-
-                emit("DOWNLOADING", f"File {file_idx+1}/{total_files}: Downloading {key}…", base_pct + pct_step * 0.05)
+                emit("DOWNLOADING", f"[{file_idx+1}/{total_files}] Downloading {key}…", (file_idx / total_files) * 0.1)
                 local = tmp_path / Path(key).name
                 self.storage.download(key, local)
+                is_media = is_media_file(local)
+                local_files.append((key, local, is_media))
                 logger.info("Downloaded %s → %s (%d bytes)", key, local, local.stat().st_size)
 
-                is_media = is_media_file(local)
-                stage = "STT" if is_media else "PARSING"
-                action = "Transcribing media with Rev AI" if is_media else "Parsing document"
-                emit(stage, f"File {file_idx+1}/{total_files}: {action}…", base_pct + pct_step * 0.10)
-                
+            # ── 2. Batch parse PDF files together ─────────────────────────────
+            pdf_entries = [e for e in local_files if not e[2]]
+            media_entries = [e for e in local_files if e[2]]
+
+            doc_map: dict[str, ParsedDocument] = {}
+
+            if pdf_entries:
+                emit("PARSING", f"Batch parsing {len(pdf_entries)} PDF file(s) together…", 0.15)
+                pdf_paths = [str(e[1]) for e in pdf_entries]
                 try:
-                    if is_media:
-                        if self.transcriber is None:
-                            raise RuntimeError("No STT transcriber configured for media ingestion.")
-                        documents = self.transcriber.load([str(local)])
-                    else:
-                        documents = self.loader.load([str(local)])
-                except Exception as e:
-                    logger.error("%s failed for %s: %s", stage, key, e)
-                    documents = None
-                    
-                if not documents:
+                    parsed_docs = self.loader.load(pdf_paths)
+                    for (key, local, _), doc in zip(pdf_entries, parsed_docs):
+                        doc_map[key] = doc
+                except Exception as exc:
+                    logger.error("Batch PDF parsing failed: %s — falling back to per-file parsing", exc)
+                    for key, local, _ in pdf_entries:
+                        try:
+                            docs = self.loader.load([str(local)])
+                            if docs:
+                                doc_map[key] = docs[0]
+                        except Exception as e2:
+                            logger.error("Single PDF parse failed for %s: %s", key, e2)
+
+            for key, local, _ in media_entries:
+                emit("STT", f"Transcribing media {key}…", 0.20)
+                try:
+                    if self.transcriber is None:
+                        raise RuntimeError("No STT transcriber configured.")
+                    docs = self.transcriber.load([str(local)])
+                    if docs:
+                        doc_map[key] = docs[0]
+                except Exception as exc:
+                    logger.error("STT failed for %s: %s", key, exc)
+
+            # ── 3. Chunk, embed, and upsert each document ─────────────────────
+            for file_idx, (key, local, _) in enumerate(local_files):
+                base_pct = 0.25 + (file_idx / total_files) * 0.75
+                step = 0.75 / total_files
+
+                doc = doc_map.get(key)
+                if not doc or (not doc.page_content.strip() and not doc.kids):
+                    logger.warning("No parsed content for %s — skipping", key)
+                    local.unlink(missing_ok=True)
                     continue
-                
-                doc = documents[0]
-                parsed = doc.page_content
-                if not parsed or not parsed.strip():
-                    logger.warning(
-                        "Skipping empty parse result for %s",
-                        key
-                    )
-                    del doc
-                    del documents
-                    gc.collect()
-                    continue
-                
-                emit("CHUNKING", f"File {file_idx+1}/{total_files}: Chunking document…", base_pct + pct_step * 0.30)
-                records = self.chunker.process_document(
-                    parsed_json=parsed,
-                    source_key=key,
-                    job_id=job_id,
-                    page_offset=0,
-                )
-                
-                del parsed
-                del doc
-                del documents
-                
+
+                emit("CHUNKING", f"[{file_idx+1}/{total_files}] Chunking {key}", base_pct + step * 0.1)
+                records = self.chunker.process_document(doc=doc)
+
                 if not records:
-                    gc.collect()
+                    logger.warning("No chunks produced for %s", key)
+                    local.unlink(missing_ok=True)
                     continue
 
-                # ── Embed Text + Captions for this chunk ──────────────────────
-                text_embeddable = [r for r in records if r["record_type"] in ("text", "caption")]
-                if text_embeddable:
-                    emit("EMBEDDING", f"File {file_idx+1}/{total_files}: Embedding {len(text_embeddable)} text records…", base_pct + pct_step * 0.50)
-                    texts = [r["text"] for r in text_embeddable]
-                    logger.info(
-                        "Text records selected for embedding: ids=%s char_counts=%s",
-                        [r.get("id") for r in text_embeddable[:5]],
-                        [len(r.get("text") or "") for r in text_embeddable[:5]],
-                    )
-                    text_vectors = self.encoder.encode_text(texts)
-                    logger.info(
-                        "Text embedding returned %d vectors; lengths=%s",
-                        len(text_vectors),
-                        [len(v) if hasattr(v, "__len__") else "unknown" for v in text_vectors[:5]],
-                    )
-                    if len(text_vectors) != len(text_embeddable):
-                        raise ValueError(
-                            "Text embedding count mismatch: "
-                            f"got {len(text_vectors)} vectors for {len(text_embeddable)} records."
-                        )
-                    for rec, vec in zip(text_embeddable, text_vectors):
-                        rec["_vector"] = vec
-                    del texts
-                    del text_vectors
-                    gc.collect()
+                image_elem_ids = {
+                    r.metadata["id"]
+                    for r in records
+                    if r.metadata.get("type") == "image"
+                }
+                for r in records:
+                    if r.metadata.get("type") == "caption":
+                        raw_lid = r.metadata.get("linked_image_id")
+                        if raw_lid is not None and raw_lid in image_elem_ids:
+                            r.metadata["linked_image_id"] = f"{key}::{raw_lid}"
 
-                # ── Embed Images for this chunk ───────────────────────────────
-                image_recs = [r for r in records if r["record_type"] == "image"]
-                if image_recs:
-                    emit("EMBEDDING", f"File {file_idx+1}/{total_files}: Embedding {len(image_recs)} images…", base_pct + pct_step * 0.70)
-                    from PIL import Image
-                    
-                    img_batch_size = 4
-                    for i in range(0, len(image_recs), img_batch_size):
-                        batch_recs = image_recs[i : i + img_batch_size]
-                        images = []
-                        valid_recs = []
-                        
-                        for r in batch_recs:
-                            if r.get("image_path") and Path(r["image_path"]).exists():
-                                try:
-                                    img = Image.open(r["image_path"]).convert("RGB")
-                                    images.append(img)
-                                    valid_recs.append(r)
-                                except Exception as e:
-                                    logger.warning("Failed to open image %s: %s", r["image_path"], e)
-                        
-                        if images:
-                            image_vectors = self.encoder.encode_image(images, batch_size=2)
-                            logger.info(
-                                "Image embedding returned %d vectors; lengths=%s",
-                                len(image_vectors),
-                                [len(v) if hasattr(v, "__len__") else "unknown" for v in image_vectors[:5]],
-                            )
-                            if len(image_vectors) != len(valid_recs):
-                                raise ValueError(
-                                    "Image embedding count mismatch: "
-                                    f"got {len(image_vectors)} vectors for {len(valid_recs)} records."
-                                )
-                            for rec, vec in zip(valid_recs, image_vectors):
-                                rec["_vector"] = vec
-                            
-                            for img in images:
-                                img.close()
-                            
-                            del images
-                            del image_vectors
-                            gc.collect()
+                text_recs = [r for r in records if r.metadata.get("type") != "image"]
+                image_recs = [r for r in records if r.metadata.get("type") == "image"]
 
-                # ── Upsert to Pinecone for this chunk ─────────────────────────
-                emit("UPSERTING", f"File {file_idx+1}/{total_files}: Uploading {len(records)} vectors…", base_pct + pct_step * 0.85)
-                pinecone_vecs = []
-                expected_dim = self.encoder.get_dimension()
-                for rec in records:
-                    raw_vec = rec.get("_vector")
-                    if raw_vec is None:
-                        logger.warning(
-                            "Skipping record %s (%s) with no embedding vector",
-                            rec.get("id"),
-                            rec.get("record_type"),
-                        )
-                        continue
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="weaviate-upsert") as upsert_ex:
+                    pending: Future | None = None
 
-                    try:
-                        vec = [float(v) for v in raw_vec]
-                    except (TypeError, ValueError):
-                        logger.warning(
-                            "Skipping record %s (%s) with non-numeric vector",
-                            rec.get("id"),
-                            rec.get("record_type"),
-                        )
-                        continue
+                    if text_recs:
+                        emit("EMBEDDING", f"[{file_idx+1}/{total_files}] Embedding {len(text_recs)} text records for {key}", base_pct + step * 0.4)
+                        n, pending = self._stream_text_embed_upsert(text_recs, key, upsert_ex, pending)
+                        stats["text_records"] += sum(1 for r in text_recs if r.metadata.get("type") not in ("caption",))
+                        stats["caption_records"] += sum(1 for r in text_recs if r.metadata.get("type") == "caption")
 
-                    if len(vec) != expected_dim:
-                        logger.warning(
-                            "Skipping record %s (%s) with invalid vector length %s (expected %s)",
-                            rec.get("id"),
-                            rec.get("record_type"),
-                            len(vec),
-                            expected_dim,
-                        )
-                        continue
+                    if image_recs:
+                        emit("EMBEDDING", f"[{file_idx+1}/{total_files}] Embedding {len(image_recs)} images for {key}", base_pct + step * 0.7)
+                        n, pending = self._stream_image_embed_upsert(image_recs, key, upsert_ex, pending)
+                        stats["image_records"] += len(image_recs)
 
-                    meta = {k: v for k, v in rec["metadata"].items() if v is not None}
-                    for key_m in ("page_numbers", "bboxes"):
-                        if key_m in meta and isinstance(meta[key_m], list):
-                            if key_m == "bboxes":
-                                meta[key_m] = json.dumps(meta[key_m])
-                            elif key_m == "page_numbers":
-                                # Pinecone lists must contain strings, not numbers
-                                meta[key_m] = [str(int(p)) if isinstance(p, float) else str(p) for p in meta[key_m]]
+                    if pending is not None:
+                        pending.result()
 
-                    pinecone_vecs.append({
-                        "id": rec["id"],
-                        "values": vec,
-                        "metadata": meta,
-                    })
-
-                logger.info(
-                    "Prepared Pinecone vectors: count=%d lengths=%s ids=%s",
-                    len(pinecone_vecs),
-                    [len(v["values"]) for v in pinecone_vecs[:5]],
-                    [v["id"] for v in pinecone_vecs[:5]],
-                )
-                if pinecone_vecs:
-                    self.vdb.upsert_batch(pinecone_vecs)
-                else:
-                    logger.warning(
-                        "No valid Pinecone vectors prepared for %s; records=%d",
-                        key,
-                        len(records),
-                    )
-
-                # Update stats
-                summary_stats["text_records"] += sum(1 for r in records if r["record_type"] == "text")
-                summary_stats["image_records"] += len(image_recs)
-                summary_stats["caption_records"] += sum(1 for r in records if r["record_type"] == "caption")
-                summary_stats["total_records"] += len(records)
-
-                # Clear this chunk's data from memory completely
-                del records
-                del text_embeddable
-                del image_recs
-                del pinecone_vecs
+                stats["total_records"] += len(records)
+                del records, text_recs, image_recs
                 gc.collect()
                 local.unlink(missing_ok=True)
 
-
-            emit("DONE", f"Done. {summary_stats['total_records']} total records indexed.", 1.0)
-            logger.info("✅ Pipeline complete for job %s: %s", job_id, summary_stats)
-            return summary_stats
+        emit("DONE", f"Pipeline complete — {stats['total_records']} records indexed.", 1.0)
+        logger.info("✅ Job %s complete: %s", job_id, stats)
+        return stats
