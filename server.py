@@ -14,18 +14,42 @@ import asyncio
 import json
 import logging
 import shutil
-import uuid
 from pathlib import Path
 
 import aiofiles
 import aiofiles.os
 from celery.result import AsyncResult
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-import config
+from config import (
+    BASE_URL,
+    CHUNKS_DIR,
+    DEVICE,
+    EMBED_BATCH,
+    EMBEDDING_MODEL,
+    HEAVY_WEIGHT,
+    INDEX_NAME,
+    LIGHT_WEIGHT,
+    NVIDIA_API_KEY,
+    QWEN_MODEL,
+    QWEN_SERVER_URL,
+    RERANK_TOP_K,
+    RETRIEVE_TOP_K,
+    UPLOAD_DIR,
+    WEAVIATE_API_KEY,
+    WEAVIATE_REST_ENDPOINT,
+)
+
+from ingestion.embedding import MultimodalEncoder
+from retrieval.answer import AnswerGenerator
+from retrieval.pipeline import RetrievalPipeline
+from retrieval.reranker import HybridReranker
+from storage.weaviate import WeaviateVDB
+
 from tasks import celery_app, run_ingestion
 
 logging.basicConfig(
@@ -44,68 +68,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── directories ───────────────────────────────────────────────────────────────
-
-UPLOAD_DIR = Path(config.UPLOAD_DIR)
-CHUNKS_DIR = UPLOAD_DIR / ".chunks"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
-
-# ── lazy retrieval pipeline (loaded once on first /ask) ───────────────────────
-
-_retrieval_pipeline = None
-_answer_generator = None
+_retrieval_pipeline: RetrievalPipeline | None = None
+_answer_generator: AnswerGenerator | None = None
 
 
-def _get_retrieval():
+def _get_retrieval() -> tuple[RetrievalPipeline, AnswerGenerator]:
     global _retrieval_pipeline, _answer_generator
-    if _retrieval_pipeline is not None:
-        return _retrieval_pipeline, _answer_generator
+    if _retrieval_pipeline is None or _answer_generator is None:
+        logger.info("Initializing retrieval pipeline and answer generator...")
+        reranker = HybridReranker()
+        encoder = MultimodalEncoder(device=DEVICE, batch_size=EMBED_BATCH, model_name=EMBEDDING_MODEL)
+        vdb = WeaviateVDB(
+            endpoint=WEAVIATE_REST_ENDPOINT,
+            api_key=WEAVIATE_API_KEY,
+            index=INDEX_NAME,
+            dimension=encoder.d_model,
+        )
 
-    logger.info("Initialising retrieval pipeline (lazy)…")
+        qwen_base_url = QWEN_SERVER_URL.rstrip("/")
+        if not qwen_base_url.endswith("/v1"):
+            qwen_base_url += "/v1"
 
-    # Load reranker BEFORE encoder — see app.py comment about transformers registry
-    from retrieval.reranker import HybridReranker
-    reranker = HybridReranker()
+        logger.info("Connecting AsyncOpenAI client to QWEN_SERVER_URL: %s", qwen_base_url)
+        client = AsyncOpenAI(api_key="EMPTY", base_url=qwen_base_url)
+        model_name = QWEN_MODEL
 
-    from ingestion.embedding import MultimodalEncoder
-    from storage.weaviate import WeaviateVDB
-    from retrieval.pipeline import RetrievalPipeline
-    from retrieval.answer import AnswerGenerator
-    from openai import AsyncOpenAI
-
-    encoder = MultimodalEncoder(device=config.EMBEDDING_DEVICE, batch_size=config.EMBED_BATCH)
-
-    index_name = (
-        getattr(config, "INDEX_NAME", None)
-        or getattr(config, "PINECONE_INDEX_NAME", "RagPipeline")
-    )
-    vdb = WeaviateVDB(
-        endpoint=config.WEAVIATE_REST_ENDPOINT,
-        api_key=config.WEAVIATE_API_KEY,
-        index_name=index_name,
-        dimension=encoder.get_dimension(),
-    )
-
-    local_base_url = config.LOCAL_LLM_URL
-    if not local_base_url.endswith("/v1") and not local_base_url.endswith("/v1/"):
-        local_base_url = f"{local_base_url.rstrip('/')}/v1"
-
-    local_llm_client = AsyncOpenAI(api_key="local", base_url=local_base_url)
-    nvidia_client = AsyncOpenAI(api_key=config.NVIDIA_API_KEY, base_url=config.NVIDIA_BASE_URL)
-
-    _retrieval_pipeline = RetrievalPipeline(
-        encoder=encoder,
-        vdb=vdb,
-        local_client=local_llm_client,
-        retrieve_top_k=config.RETRIEVE_TOP_K,
-        rerank_top_k=config.RERANK_TOP_K,
-        reranker=reranker,
-    )
-    _answer_generator = AnswerGenerator(client=nvidia_client, model=config.HEAVY_WEIGHT_MODEL)
-
-    logger.info("Retrieval pipeline ready (Local LLM: %s, VLM: %s).", local_base_url, config.HEAVY_WEIGHT_MODEL)
+        _retrieval_pipeline = RetrievalPipeline(
+            encoder=encoder,
+            vdb=vdb,
+            local_client=client,
+            local_model=model_name,
+            retrieve_top_k=RETRIEVE_TOP_K,
+            rerank_top_k=RERANK_TOP_K,
+            reranker=reranker,
+        )
+        _answer_generator = AnswerGenerator(
+            client=client,
+            model=model_name,
+        )
     return _retrieval_pipeline, _answer_generator
+
 
 
 # ── health ────────────────────────────────────────────────────────────────────
@@ -131,7 +133,7 @@ async def receive_chunk(
     The frontend sends slices in order; the server stores them as
     ``<CHUNKS_DIR>/<upload_id>/<chunk_index:05d>.part``.
     """
-    slot_dir = CHUNKS_DIR / upload_id
+    slot_dir = Path(CHUNKS_DIR) / upload_id
     await aiofiles.os.makedirs(str(slot_dir), exist_ok=True)
 
     chunk_path = slot_dir / f"{chunk_index:05d}.part"
@@ -157,8 +159,10 @@ async def finalize_upload(
     Reassemble all slices into the final file (async I/O), then dispatch
     a Celery ingestion task.
     """
-    slot_dir = CHUNKS_DIR / upload_id
-    final_path = UPLOAD_DIR / filename
+    slot_dir = Path(CHUNKS_DIR) / upload_id
+    upload_dir_path = Path(UPLOAD_DIR)
+    upload_dir_path.mkdir(parents=True, exist_ok=True)
+    final_path = upload_dir_path / filename
 
     logger.info(
         "Finalising upload_id=%s  filename=%s  total_chunks=%d",
@@ -177,11 +181,10 @@ async def finalize_upload(
     await asyncio.to_thread(shutil.rmtree, str(slot_dir), True)
     logger.info("Assembled %s (%d bytes)", final_path, final_path.stat().st_size)
 
-    # Storage key is the filename relative to UPLOAD_DIR
-    storage_key = filename
+    storage_key = str(final_path)
     job_id = upload_id
 
-    task = run_ingestion.delay(job_id=job_id, storage_keys=[storage_key])
+    task = run_ingestion.delay(job_id=job_id, storage_keys=storage_key)
     logger.info("Dispatched Celery task %s for job %s", task.id, job_id)
 
     return {"task_id": task.id, "job_id": job_id, "file": filename}
@@ -281,3 +284,4 @@ def _serialise_results(results: list[dict]) -> list[dict]:
                 }
         out.append(entry)
     return out
+

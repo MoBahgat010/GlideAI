@@ -1,15 +1,3 @@
-"""
-Retrieval pipeline — Weaviate hybrid search + cross-encoder rerank + caption enrichment (Async).
-
-Flow:
-  1. Expand query (rewrite + HyDE) in 1 SINGLE call to local LLM using QueryRewriteAndHyDE Pydantic model
-  2. Embed all three variants via jina-clip-v2 text tower
-  3. Hybrid query Weaviate (BM25 + dense vector, alpha=0.5) × 3 in parallel with asyncio.gather
-  4. Cross-encoder + BM25 rerank → top-k
-  5. Enrich: for every caption result fetch its linked image; for every image
-     result attach any caption that references it
-"""
-
 import asyncio
 import logging
 from typing import Callable

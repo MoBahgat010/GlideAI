@@ -11,6 +11,8 @@ langchain-opendataloader-pdf     # OpenDataLoaderPDFLoader (PDF parsing)
 
 # ── Weaviate ──────────────────────────────────────────────────────────────────
 weaviate-client>=3.24
+langchain-weaviate>=0.0.1
+
 
 # ── Celery + Redis ────────────────────────────────────────────────────────────
 celery[redis]>=5.3

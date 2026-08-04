@@ -22,8 +22,11 @@ class _CrossEncoderReranker:
         self.model = CrossEncoder(model_name, model_kwargs={"torch_dtype": torch.float16})
 
     def score(self, query: str, passages: list[str]) -> np.ndarray:
+        import torch
         pairs = [[query, p] for p in passages]
-        return np.array(self.model.predict(pairs), dtype=float)
+        with torch.inference_mode():
+            return np.array(self.model.predict(pairs, batch_size=32), dtype=float)
+
 
 
 class _BM25Reranker:

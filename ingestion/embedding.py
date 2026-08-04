@@ -1,215 +1,90 @@
-"""
-Multimodal encoder using jinaai/jina-clip-v2.
-
-Dual-tower architecture:
-  - Text tower  → model.get_text_features()  → d_model-dim normalised vector
-  - Image tower → model.get_image_features() → d_model-dim normalised vector
-
-Both towers share the same embedding space, so text and image vectors
-are directly comparable via cosine similarity in Pinecone.
-
-Also provides a LangChain Embeddings adapter (JinaClipTextEmbeddings)
-for use with SemanticChunker.
-"""
-
+import base64
+import binascii
+import io
 import logging
-import threading
 from typing import Any
 
 import torch
-from torch import nn
-from PIL import Image
-from transformers import AutoTokenizer, AutoProcessor, AutoModel
-from langchain_core.embeddings import Embeddings
+from PIL import Image, UnidentifiedImageError
+from langchain_core.documents import Document
+from langchain_huggingface import HuggingFaceEmbeddings
 
 logger = logging.getLogger("ingestion.embedding")
 
-
-class MultimodalEncoder(nn.Module):
-    """
-    Dual-tower encoder backed by jinaai/jina-clip-v2.
-
-    All parameters are frozen (inference-only).
-    Supports batched encoding for both text and images.
-    """
-
-    def __init__(self, device: str | None = None, d_model: int = 1024, batch_size: int = 64):
-        super().__init__()
-        self.d_model = d_model
+class MultimodalEncoder:
+    def __init__(self, device: str, batch_size: int, model_name: str):
         self.batch_size = batch_size
-        requested_device = (device or "").strip().lower() if device else ""
-        if requested_device in {"cuda", "cuda:0", "cpu"}:
-            self.device = requested_device
-        else:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        if self.device.startswith("cuda") and not torch.cuda.is_available():
-            logger.warning(
-                "CUDA was requested but is not available; falling back to CPU."
-            )
-            self.device = "cpu"
-        self._model_lock = threading.Lock()
-
-        # -----------------------------------------------------------------------------
-
-        logger.info("Loading jinaai/jina-clip-v2 on device=%s …", self.device)
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            "jinaai/jina-clip-v2", trust_remote_code=True
+        self.text_embeddings = HuggingFaceEmbeddings(
+            model_name=model_name,
+            model_kwargs={"trust_remote_code": True, "device": device},
+            encode_kwargs={"normalize_embeddings": True, "batch_size": batch_size},
         )
-        self.processor = AutoProcessor.from_pretrained(
-            "jinaai/jina-clip-v2", trust_remote_code=True
-        )
-        self.model = AutoModel.from_pretrained(
-            "jinaai/jina-clip-v2", 
-            trust_remote_code=True,
-        ).to(self.device)
 
-        num_params = sum(p.numel() for p in self.parameters())
-        logger.info("jina-clip-v2 loaded — %s parameters (all frozen)", f"{num_params:,}")
+        self.image_embeddings = self.text_embeddings._client
+        self.d_model = self.image_embeddings.get_sentence_embedding_dimension()
 
-        for param in self.parameters():
-            param.requires_grad = False
+        logger.info("Loaded %s (dim=%s) on device=%s", model_name, self.d_model, self.image_embeddings.device)
 
-    # ── public API ────────────────────────────────────────────────────────────
 
-    def get_dimension(self) -> int:
-        """Return the embedding dimension."""
-        return self.d_model
-
-    @torch.no_grad()
-    def encode_text(
-        self, texts: list[str], batch_size: int = 64
-    ) -> list[list[float]]:
-        """
-        Encode a list of texts via the text tower.
-
-        Returns a list of ``d_model``-dim normalised vectors (as plain Python lists).
-        Processes in small batches to manage VRAM/RAM.
-        """
-        batch_size = batch_size or self.batch_size
+    def encode_text(self, texts: list[str]) -> list[list[float]]:
         safe_texts = [t if (t and t.strip()) else " " for t in texts]
-        all_embeddings: list[list[float]] = []
+        with torch.inference_mode():
+            return self.text_embeddings.embed_documents(safe_texts)
 
-        for start in range(0, len(safe_texts), batch_size):
-            batch = safe_texts[start : start + batch_size]
-            logger.info(
-                "Encoding text batch %d-%d/%d (batch_size=%d)",
-                start + 1,
-                min(start + len(batch), len(safe_texts)),
-                len(safe_texts),
-                len(batch),
+    def encode_image(self, images: list[Image.Image]) -> list[list[float]]:
+        with torch.inference_mode():
+            embeddings = self.image_embeddings.encode(
+                images,
+                batch_size=self.batch_size,
+                normalize_embeddings=True,
+                convert_to_numpy=True,
             )
-            tokens = self.tokenizer(
-                batch, padding=True, truncation=True, return_tensors="pt"
-            )
-            tokens = {k: v.to(self.device) for k, v in tokens.items()}
-            with self._model_lock:
-                features = self.model.get_text_features(**tokens).float()
-            features = nn.functional.normalize(features, p=2, dim=-1, eps=1e-12)
-            if features.ndim != 2 or features.shape[-1] != self.d_model:
-                raise ValueError(
-                    f"Unexpected text embedding shape {tuple(features.shape)} "
-                    f"(expected (*, {self.d_model}))"
-                )
-            if not torch.isfinite(features).all():
-                raise ValueError(
-                    "Text encoder produced non-finite values after normalization. "
-                    "This usually means the model returned an all-zero or invalid feature vector."
-                )
-            logger.info(
-                "Text embedding batch output shape=%s dtype=%s device=%s",
-                tuple(features.shape),
-                features.dtype,
-                features.device,
-            )
-            all_embeddings.extend(features.cpu().tolist())
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-        logger.debug(
-            "encode_text: %d texts → %d vectors (dim=%d)",
-            len(texts), len(all_embeddings),
-            len(all_embeddings[0]) if all_embeddings else 0,
-        )
-        return all_embeddings
-
-    @torch.no_grad()
-    def encode_image(
-        self, images: list[Image.Image], batch_size: int = 64
-    ) -> list[list[float]]:
-        """
-        Encode a list of PIL Images via the image tower.
-
-        Returns a list of ``d_model``-dim normalised vectors (as plain Python lists).
-        Uses a small default batch_size because images consume high VRAM.
-        """
-        batch_size = batch_size or max(1, self.batch_size // 2)
-        all_embeddings: list[list[float]] = []
-
-        for start in range(0, len(images), batch_size):
-            batch = images[start : start + batch_size]
-            logger.info(
-                "Encoding image batch %d-%d/%d (batch_size=%d)",
-                start + 1,
-                min(start + len(batch), len(images)),
-                len(images),
-                len(batch),
-            )
-            inputs = self.processor(
-                images=batch, return_tensors="pt"
-            )
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            with self._model_lock:
-                features = self.model.get_image_features(**inputs).float()
-            features = nn.functional.normalize(features, p=2, dim=-1, eps=1e-12)
-            if features.ndim != 2 or features.shape[-1] != self.d_model:
-                raise ValueError(
-                    f"Unexpected image embedding shape {tuple(features.shape)} "
-                    f"(expected (*, {self.d_model}))"
-                )
-            if not torch.isfinite(features).all():
-                raise ValueError(
-                    "Image encoder produced non-finite values after normalization. "
-                    "This usually means the model returned an all-zero or invalid feature vector."
-                )
-            logger.info(
-                "Image embedding batch output shape=%s dtype=%s device=%s",
-                tuple(features.shape),
-                features.dtype,
-                features.device,
-            )
-            all_embeddings.extend(features.cpu().tolist())
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-        logger.debug(
-            "encode_image: %d images → %d vectors (dim=%d)",
-            len(images), len(all_embeddings),
-            len(all_embeddings[0]) if all_embeddings else 0,
-        )
-        return all_embeddings
-
-    def forward(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError(
-            "Use encode_text() or encode_image() directly."
-        )
+            return embeddings.tolist()
 
 
-class JinaClipTextEmbeddings(Embeddings):
-    """
-    LangChain Embeddings adapter wrapping MultimodalEncoder.encode_text().
+    def embed_chunks(self, chunks: list[Document]) -> list[dict[str, Any]]:
+        results: list[dict[str, Any] | None] = [None] * len(chunks)
 
-    Used by SemanticChunker for computing inter-sentence similarity
-    during chunk-boundary detection.
-    """
+        text_indices: list[int] = []
+        text_batch: list[str] = []
 
-    def __init__(self, encoder: MultimodalEncoder):
-        self._encoder = encoder
+        image_indices: list[int] = []
+        image_batch: list[Image.Image] = []
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return self._encoder.encode_text(texts)
+        for i, chunk in enumerate(chunks):
+            # if chunk.metadata.get("type") == "image":
+            #     pil_image = self._decode_base64_image(chunk.metadata.get("image_path"))
+            #     if pil_image is None:
+            #         logger.warning("Skipping image chunk at index %d: could not decode base64 image data", i)
+            #         continue
+            #     image_indices.append(i)
+            #     image_batch.append(pil_image)
+            # else:
+                text_indices.append(i)
+                text_batch.append(chunk.page_content)
 
-    def embed_query(self, text: str) -> list[float]:
-        return self._encoder.encode_text([text])[0]
+        if text_batch:
+            for idx, embedding in zip(text_indices, self.encode_text(text_batch)):
+                results[idx] = {"document": chunks[idx], "embedding": embedding, "modality": "text"}
+
+        if image_batch:
+            for idx, embedding in zip(image_indices, self.encode_image(image_batch)):
+                results[idx] = {"document": chunks[idx], "embedding": embedding, "modality": "image"}
+
+        return [r for r in results if r is not None]
+
+    @staticmethod
+    def _decode_base64_image(data: str | None) -> Image.Image | None:
+        if not data:
+            return None
+
+        if data.startswith("data:") and ";base64," in data:
+            data = data.split(";base64,", 1)[1]
+
+        try:
+            raw = base64.b64decode(data, validate=True)
+            return Image.open(io.BytesIO(raw)).convert("RGB")
+        except (binascii.Error, ValueError, UnidentifiedImageError, OSError) as e:
+            logger.exception("Failed to decode base64 image chunk due to %s: %s", type(e).__name__, e)
+            return None

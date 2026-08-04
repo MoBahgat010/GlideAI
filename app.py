@@ -12,7 +12,8 @@ from pathlib import Path
 
 import gradio as gr
 from celery.result import AsyncResult
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
+
 
 import logging
 
@@ -51,22 +52,26 @@ def get_retrieval_pipeline():
         from retrieval.reranker import HybridReranker
         pre_loaded_reranker = HybridReranker()
         
-        encoder = MultimodalEncoder(device=EMBEDDING_DEVICE)
-        index_name = PINECONE_INDEX_NAME
-        vdb = WeaviateVDB(WEAVIATE_REST_ENDPOINT, WEAVIATE_API_KEY, index_name, encoder.get_dimension())
-        nvidia_client = OpenAI(api_key=NVIDIA_API_KEY, base_url=NVIDIA_BASE_URL)
+        encoder = MultimodalEncoder(device=DEVICE, batch_size=EMBED_BATCH, model_name=EMBEDDING_MODEL)
+        vdb = WeaviateVDB(WEAVIATE_REST_ENDPOINT, WEAVIATE_API_KEY, INDEX_NAME, encoder.d_model)
+        
+        qwen_base_url = QWEN_SERVER_URL.rstrip("/")
+        if not qwen_base_url.endswith("/v1"):
+            qwen_base_url += "/v1"
+            
+        client = AsyncOpenAI(api_key="EMPTY", base_url=qwen_base_url)
         
         _retrieval_pipeline = RetrievalPipeline(
             encoder=encoder,
             vdb=vdb,
-            nvidia_client=nvidia_client,
-            light_model=LIGHT_WEIGHT_MODEL,
-            heavy_model=HEAVY_WEIGHT_MODEL,
+            local_client=client,
+            local_model=QWEN_MODEL,
             retrieve_top_k=RETRIEVE_TOP_K,
             rerank_top_k=RERANK_TOP_K,
             reranker=pre_loaded_reranker,
         )
     return _retrieval_pipeline
+
 
 # ── Stage decorations ──────────────────────────────────────────────────────────
 ICONS = {

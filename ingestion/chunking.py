@@ -1,198 +1,245 @@
-"""
-Document chunking for the multimodal RAG pipeline.
-
-Processes a :class:`~ingestion.models.ParsedDocument` into LangChain
-``Document`` chunks:
-
-1. **Text chunks**    — paragraph, heading, list (one chunk each).
-2. **Table chunks**   — each table rendered as Markdown, kept whole.
-3. **Image chunks**   — one chunk per image (empty ``page_content``).
-4. **Caption chunks** — caption text cross-referenced to its image via
-                        ``linked_image_id`` in metadata.
-
-Metadata on every chunk is minimal:
-  ``file_name``, ``bbox``, ``id``, ``type``
-  + ``image_path``      (image only)
-  + ``linked_image_id`` (caption only)
-"""
-
-import logging
-from typing import Any, Generator
-
+from typing import Any
 from langchain_core.documents import Document
+import json
 
-from ingestion.models import ParsedDocument
+class SemanticChunker:
+    def __init__(self, max_chars: int, overlap_chars: int):
+        self.max_chars = max_chars
+        self.overlap_chars = overlap_chars
 
-logger = logging.getLogger("ingestion.chunking")
+    def chunk(self, document: Document) -> list[Document]:
+        data: dict[str, Any] = json.loads(document.page_content)
 
-_TEXT_TYPES = {"paragraph", "heading", "caption", "list_item"}
+        file_name = data.get("file name", "")
+        docs: list[Document] = []
 
+        print(f"Chunking document: {file_name}")
 
-def walk(kids: list[dict[str, Any]], etypes: str | set[str] | tuple[str, ...]) -> Generator[dict, None, None]:
-    """Depth-first traversal, yielding elements whose ``type`` matches *etypes*."""
-    if isinstance(etypes, str):
-        target_types = {etypes}
-    else:
-        target_types = set(etypes)
+        self._visit(node=data, docs=docs, heading_stack=[], file_name=file_name)
 
-    for elem in kids:
-        if elem.get("type") in target_types:
-            yield elem
-        for child_key in ("kids", "list_items"):
-            if child_key in elem:
-                yield from walk(elem[child_key], target_types)
+        return self._merge_small_paragraphs(docs)
 
+    def _visit(self, node: dict, docs: list[Document], heading_stack: list[str], file_name: str):
+        node_type = node.get("type")
 
-def table_to_markdown(table: dict[str, Any]) -> str:
-    rows: list[dict] = table.get("rows", [])
-    if not rows:
-        return ""
+        if node_type in ("heading", "title"):
+            heading = self._get_text(node)
+            if heading:
+                heading_stack = heading_stack + [heading]
 
-    md_rows: list[list[str]] = []
-    for row in rows:
-        cells = row.get("cells", [])
-        cell_texts: list[str] = []
-        for cell in cells:
-            parts = [
-                kid.get("content", "").strip()
-                for kid in cell.get("kids", [])
-                if kid.get("type") in _TEXT_TYPES
-            ]
-            cell_texts.append(" ".join(parts))
-        md_rows.append(cell_texts)
+        elif node_type in ("paragraph", "text_block", "list_item", "list item"):
+            docs.extend(self._paragraph_to_docs(node, heading_stack, file_name))
 
-    if not md_rows:
-        return ""
+        elif node_type == "table":
+            docs.extend(self._table_to_docs(node, heading_stack, file_name))
 
-    header = md_rows[0]
-    separator = ["---"] * len(header)
-    lines = [
-        "| " + " | ".join(header) + " |",
-        "| " + " | ".join(separator) + " |",
-    ]
-    for row in md_rows[1:]:
-        padded = row + [""] * (len(header) - len(row))
-        lines.append("| " + " | ".join(padded) + " |")
+        elif node_type in ("image", "figure"):
+            doc = self._image_to_doc(node, heading_stack, file_name)
 
-    return "\n".join(lines)
+            if doc:
+                docs.append(doc)
 
+        elif node_type == "caption":
+            docs.extend(self._paragraph_to_docs(node, heading_stack, file_name))
 
-def list_to_text(list_elem: dict[str, Any]) -> str:
-    items = list_elem.get("list_items", [])
-    parts = [item.get("content", "").strip() for item in items if item.get("content")]
-    return "\n\n".join(parts)
+        for child in node.get("kids", []):
+            self._visit(child, docs, heading_stack, file_name)
 
+    def _get_text(self, node: dict) -> str:
+        """
+        OpenDataLoader versions have used either
+        'content' or 'text'. Support both.
+        """
 
-class DocumentChunker:
-    def __init__(self):
-        pass
+        return (
+            node.get("content")
+            or node.get("text")
+            or ""
+        ).strip()
 
-    def text_chunks(self, doc: ParsedDocument) -> list[Document]:
-        chunks: list[Document] = []
-        print("Document: ", doc)
-        for elem in walk(doc.kids, {"paragraph", "heading", "list"}):
-            etype = elem.get("type", "")
-            if etype in ("paragraph", "heading"):
-                text = elem.get("content", "").strip()
-            elif etype == "list":
-                text = list_to_text(elem)
-            else:
-                continue
-            if not text:
-                continue
-            chunks.append(Document(
-                page_content=text,
-                metadata={
-                    "file_name": doc.file_name,
-                    "bbox": elem.get("bounding box"),
-                    "id": elem.get("id"),
-                    "type": etype,
-                },
-            ))
-        return chunks
+    def _paragraph_to_docs(self, node: dict, headings: list[str], file_name: str) -> list[Document]:
+        text = self._get_text(node)
 
-    def table_chunks(self, doc: ParsedDocument) -> list[Document]:
-        chunks: list[Document] = []
-        for table in walk(doc.kids, "table"):
-            md = table_to_markdown(table)
-            if not md.strip():
-                continue
-            chunks.append(Document(
-                page_content=md,
-                metadata={
-                    "file_name": doc.file_name,
-                    "bbox": table.get("bounding box"),
-                    "id": table.get("id"),
-                    "type": "table",
-                },
-            ))
-        return chunks
+        if not text:
+            return []
 
-    def image_chunks(self, doc: ParsedDocument) -> list[Document]:
-        chunks: list[Document] = []
-        for img in walk(doc.kids, "image"):
-            path = img.get("source") or img.get("data", "")
-            if not path:
-                continue
-            chunks.append(Document(
-                page_content="",
-                metadata={
-                    "file_name": doc.file_name,
-                    "bbox": img.get("bounding box"),
-                    "id": img.get("id"),
-                    "type": "image",
-                    "image_path": path,
-                },
-            ))
-        return chunks
+        prefix = "\n".join(filter(None, headings))
 
-    def caption_chunks(
-        self,
-        doc: ParsedDocument,
-        image_chunks: list[Document],
-    ) -> list[Document]:
-        img_id_map: dict[int, Any] = {
-            img.get("id"): chunk.metadata["id"]
-            for img, chunk in zip(walk(doc.kids, "image"), image_chunks)
-            if img.get("id") is not None
+        full_text = f"{prefix}\n\n{text}" if prefix else text
+
+        metadata = {
+            "id": node.get("id"),
+            "type": node.get("type"),
+            "page": node.get("page number"),
+            "bbox": node.get("bounding box"),
+            "file_name": file_name,
         }
 
-        chunks: list[Document] = []
-        for cap in walk(doc.kids, "caption"):
-            text = cap.get("content", "").strip()
-            if not text:
-                continue
-            linked_elem_id  = cap.get("linked_content_id")
-            linked_image_id = img_id_map.get(linked_elem_id) if linked_elem_id else None
-            chunks.append(Document(
-                page_content=text,
-                metadata={
-                    "file_name": doc.file_name,
-                    "bbox": cap.get("bounding box"),
-                    "id": cap.get("id"),
-                    "type": "caption",
-                    "linked_image_id": linked_image_id,
-                },
-            ))
-        return chunks
+        if node.get("linked content id", None):
+            metadata["linked_content_id"] = node["linked content id"]
 
-    # ── public API ─────────────────────────────────────────────────────────────
-
-    def process_document(self, doc: ParsedDocument) -> list[Document]:
-        text_chunks    = self.text_chunks(doc)
-        table_chunks   = self.table_chunks(doc)
-        image_chunks   = self.image_chunks(doc)
-        caption_chunks = self.caption_chunks(doc, image_chunks)
-
-        all_chunks = text_chunks + table_chunks + image_chunks + caption_chunks
-
-        logger.info(
-            "process_document(%s): text=%d  tables=%d  images=%d  captions=%d",
-            doc.file_name,
-            len(text_chunks),
-            len(table_chunks),
-            len(image_chunks),
-            len(caption_chunks),
+        return self._split(
+            full_text,
+            metadata=metadata,
         )
 
-        return all_chunks
+    def _table_to_docs(self, node: dict, headings: list[str], file_name: str) -> list[Document]:
+
+        rows = []
+
+        for row in node.get("rows", []):
+            cells = []
+            for cell in row.get("cells", []):
+                # Cell text lives inside its kids (paragraph nodes)
+                cell_text = " ".join(
+                    self._get_text(kid) for kid in cell.get("kids", [])
+                    if self._get_text(kid)
+                ).strip()
+                if cell_text:
+                    cells.append(cell_text)
+            if cells:
+                rows.append(" | ".join(cells))
+
+        if not rows:
+            return []
+
+        table_text = "\n".join(rows)
+
+        prefix = "\n".join(filter(None, headings))
+
+        if prefix:
+            table_text = prefix + "\n\n" + table_text
+
+        return self._split(
+            table_text,
+            metadata={
+                "id": node.get("id"),
+                "type": "table",
+                "page": node.get("page number"),
+                "bbox": node.get("bounding box"),
+                "file_name": file_name,
+            },
+        )
+
+
+    def _image_to_doc(
+        self,
+        node: dict,
+        headings: list[str],
+        file_name: str,
+    ):
+        caption = (
+            node.get("caption")
+            or self._get_text(node)
+            or "[image]"
+        ).strip()
+
+        prefix = "\n".join(filter(None, headings))
+
+        text = f"{prefix}\n\n{caption}" if prefix else caption
+
+        # OpenDataLoader stores base64 image under "data"; "source" may also exist
+        image_path = node.get("data") or node.get("source") or node.get("alt_source")
+
+        return Document(
+            page_content=text,
+            metadata={
+                "id": node.get("id"),
+                "type": "image",
+                "page": node.get("page number"),
+                "bbox": node.get("bounding box"),
+                "image_path": image_path,
+                "file_name": file_name,
+            },
+        )
+
+    def _split(
+        self,
+        text: str,
+        metadata: dict,
+    ) -> list[Document]:
+
+        if len(text) <= self.max_chars:
+            return [
+                Document(
+                    page_content=text,
+                    metadata=metadata,
+                )
+            ]
+
+        docs = []
+        start = 0
+
+        while start < len(text):
+
+            end = min(
+                start + self.max_chars,
+                len(text),
+            )
+
+            if end < len(text):
+
+                while end > start and not text[end].isspace():
+                    end -= 1
+
+                if end == start:
+                    end = min(
+                        start + self.max_chars,
+                        len(text),
+                    )
+
+            docs.append(
+                Document(
+                    page_content=text[start:end].strip(),
+                    metadata=metadata.copy(),
+                )
+            )
+
+            start = max(
+                end - self.overlap_chars,
+                start + 1,
+            )
+
+        return docs
+
+    def _merge_small_paragraphs(
+        self,
+        docs: list[Document],
+    ) -> list[Document]:
+
+        merged = []
+        buffer = None
+
+        for doc in docs:
+
+            if doc.metadata.get("type") != "paragraph":
+
+                if buffer:
+                    merged.append(buffer)
+                    buffer = None
+
+                merged.append(doc)
+                continue
+
+            if buffer is None:
+                buffer = doc
+                continue
+
+            if (
+                buffer.metadata["page"] == doc.metadata["page"]
+                and len(buffer.page_content)
+                + len(doc.page_content)
+                + 2
+                <= self.max_chars
+            ):
+
+                buffer.page_content += "\n\n" + doc.page_content
+
+            else:
+                merged.append(buffer)
+                buffer = doc
+
+        if buffer:
+            merged.append(buffer)
+
+        return merged
