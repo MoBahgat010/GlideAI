@@ -8,15 +8,11 @@ from langchain_weaviate import WeaviateVectorStore
 from weaviate.classes.init import Auth
 from weaviate.classes.config import Configure, DataType, Property
 from weaviate.classes.query import Filter, MetadataQuery
+from .vector_sotrage_strategy import VectorDatabaseStrategy
 
 logger = logging.getLogger("storage.weaviate")
 
-class WeaviateVDB:
-    """
-    Weaviate Vector Database abstraction integrating native Weaviate v4 client
-    and LangChain WeaviateVectorStore / retriever capabilities.
-    """
-
+class WeaviateVDB(VectorDatabaseStrategy):
     def __init__(
         self,
         endpoint: str,
@@ -33,8 +29,6 @@ class WeaviateVDB:
         )
 
         if not self.client.collections.exists(self.index):
-            logger.info("Creating collection '%s'...", self.index)
-
             self.client.collections.create(
                 name=self.index,
                 vector_config=Configure.Vectors.self_provided(),
@@ -83,7 +77,7 @@ class WeaviateVDB:
         if embeddings is not None:
             self.upsert(documents, embeddings)
             return [
-                doc.metadata.get("custom_id", str(uuid.uuid4()))
+                doc.metadata.get("custom_id")
                 for doc in documents
             ]
 
@@ -94,7 +88,7 @@ class WeaviateVDB:
         self,
         chunks: list[Document],
         embeddings: list[list[float]],
-    ):
+    ):  
         if len(chunks) != len(embeddings):
             raise ValueError("Number of chunks and embeddings must match.")
 
@@ -108,15 +102,14 @@ class WeaviateVDB:
                 metadata = dict(chunk.metadata)
 
                 properties = {
-                    "custom_id": metadata.get("custom_id", str(uuid.uuid4())),
+                    "custom_id": metadata.get("custom_id"),
                     "chunk_text": chunk.page_content,
                     "type": metadata.get("type"),
                     "file_name": metadata.get("file_name"),
                     "page": metadata.get("page"),
                     "bbox": metadata.get("bbox"),
-                    "image_base64": metadata.get("image_base64"),
-                    "linked_image_id": metadata.get("linked_image_id"),
-                    "linked_text_id": metadata.get("linked_text_id"),
+                    "image_base64": metadata.get("image_base64") or metadata.get("image_path"),
+                    "linked_content_id": metadata.get("linked_content_id"),
                 }
 
                 properties = { k: v for k, v in properties.items() if v is not None }
@@ -146,7 +139,8 @@ class WeaviateVDB:
         results: list[dict[str, Any]] = []
         for obj in response.objects:
             props = dict(obj.properties)
-            props["id"] = props.get("custom_id") or str(obj.uuid)
+            cid = props.get("custom_id") or str(obj.uuid)
+            props["custom_id"] = cid
             props["weaviate_uuid"] = str(obj.uuid)
             if obj.metadata and obj.metadata.score is not None:
                 props["score"] = obj.metadata.score
@@ -166,7 +160,8 @@ class WeaviateVDB:
         results: list[dict[str, Any]] = []
         for obj in response.objects:
             props = dict(obj.properties)
-            props["id"] = props.get("custom_id") or str(obj.uuid)
+            cid = props.get("custom_id") or str(obj.uuid)
+            props["custom_id"] = cid
             props["weaviate_uuid"] = str(obj.uuid)
             results.append(props)
 

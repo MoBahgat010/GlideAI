@@ -5,7 +5,7 @@ from typing import Callable
 from openai import AsyncOpenAI
 
 from ingestion.embedding import MultimodalEncoder
-from storage.weaviate import WeaviateVDB
+from storage import VDB
 from .query_rewriter import SingleCallQueryExpander, QueryRewriteAndHyDE
 from .reranker import HybridReranker
 
@@ -15,25 +15,20 @@ Progress = Callable[[str, str], None]   # (stage, message)
 
 
 class RetrievalPipeline:
-    """
-    Full multimodal retrieval pipeline using single-call Pydantic query expansion
-    and asyncio.gather for parallel Weaviate hybrid retrieval.
-    """
-
     def __init__(
         self,
         encoder: MultimodalEncoder,
-        vdb: WeaviateVDB,
+        vdb: VDB,
         local_client: AsyncOpenAI,
-        local_model: str = "default",
-        retrieve_top_k: int = 30,
-        rerank_top_k: int = 5,
-        reranker: HybridReranker | None = None,
+        local_model: str,
+        retrieve_top_k: int,
+        rerank_top_k: int,
+        reranker: HybridReranker,
     ):
         self.encoder = encoder
         self.vdb = vdb
         self.expander = SingleCallQueryExpander(local_client, local_model)
-        self.reranker = reranker or HybridReranker()
+        self.reranker = reranker
         self.retrieve_top_k = retrieve_top_k
         self.rerank_top_k = rerank_top_k
 
@@ -80,7 +75,7 @@ class RetrievalPipeline:
         seen: dict[str, dict] = {}
         for result_list in (o_results, r_results, h_results):
             for item in result_list:
-                item_id = item.get("id")
+                item_id = item.get("custom_id")
                 if not item_id:
                     continue
                 if item_id not in seen or item.get("score", 0) > seen[item_id].get("score", 0):
@@ -97,7 +92,7 @@ class RetrievalPipeline:
         emit("RETRIEVING", f"{len(candidates)} candidates — types: {type_counts}")
 
         # ── 4. Rerank ──────────────────────────────────────────────────────────
-        emit("RERANKING", f"Reranking → top {self.rerank_top_k}…")
+        emit("RERANKING", f"Reranking {len(candidates)} candidates → top {self.rerank_top_k}…")
         top_results = await asyncio.to_thread(
             self.reranker.rerank, query, candidates, top_k=self.rerank_top_k
         )
@@ -105,12 +100,12 @@ class RetrievalPipeline:
         for i, r in enumerate(top_results):
             logger.debug(
                 "  [%d] type=%-10s score=%.4f id=%s",
-                i, r.get("type", "?"), r.get("rerank_score", 0), r.get("id", "?"),
+                i, r.get("type", "?"), r.get("rerank_score", 0), r.get("custom_id", "?"),
             )
 
         # ── 5. Enrich linked content ───────────────────────────────────────────
         emit("ENRICHING", "Fetching linked images/captions…")
-        await asyncio.to_thread(self._enrich_linked_content, top_results, candidates)
+        await self._enrich_linked_content(top_results, candidates)
 
         logger.info("Retrieval complete — returning %d results", len(top_results))
         return {
@@ -120,53 +115,43 @@ class RetrievalPipeline:
             "results": top_results,
         }
 
-    def _enrich_linked_content(
+    async def _enrich_linked_content(
         self,
         results: list[dict],
         all_candidates: list[dict],
     ) -> None:
-        """
-        Cross-enrich caption↔image pairs in top results.
-        """
-        candidate_map: dict[str, dict] = {c["id"]: c for c in all_candidates if c.get("id")}
-        caption_by_image: dict[str, dict] = {
-            c["linked_image_id"]: c
-            for c in all_candidates
-            if c.get("type") == "caption" and c.get("linked_image_id")
-        }
+        candidate_map: dict[str, dict] = {}
+        for c in all_candidates:
+            cid = c.get("custom_id")
+            if cid:
+                candidate_map[cid] = c
 
-        ids_to_fetch: list[str] = []
+        ids_to_fetch: set[str] = set()
         for r in results:
-            if r.get("type") == "caption":
-                lid = r.get("linked_image_id")
-                if lid and lid not in candidate_map:
-                    ids_to_fetch.append(lid)
+            lid = r.get("linked_content_id")
+            if lid and lid not in candidate_map:
+                ids_to_fetch.add(lid)
 
-        fetched: dict[str, dict] = {}
+        fetched_map: dict[str, dict] = {}
         if ids_to_fetch:
-            logger.info("Fetching %d linked image records from Weaviate", len(ids_to_fetch))
-            fetched = {
-                rec["id"]: rec
-                for rec in self.vdb.fetch_batch(ids_to_fetch)
-                if rec.get("id")
-            }
+            logger.info("Fetching %d linked content records from Weaviate", len(ids_to_fetch))
+            fetched_list = await asyncio.to_thread(self.vdb.fetch_batch, list(ids_to_fetch))
+            for rec in fetched_list:
+                rec_id = rec.get("custom_id")
+                if rec_id:
+                    fetched_map[rec_id] = rec
 
         for r in results:
-            rtype = r.get("type")
-            rid = r.get("id")
-
-            if rtype == "caption":
-                lid = r.get("linked_image_id")
-                if lid:
-                    linked = candidate_map.get(lid) or fetched.get(lid)
-                    if linked:
-                        r["linked_image"] = linked
-                        logger.debug("Caption %s → linked image %s attached", rid, lid)
-                    else:
-                        logger.debug("Caption %s: linked image %s not found", rid, lid)
-
-            elif rtype == "image":
-                caption = caption_by_image.get(rid)
-                if caption:
-                    r["linked_caption"] = caption
-                    logger.debug("Image %s → linked caption %s attached", rid, caption.get("id"))
+            lid = r.get("linked_content_id")
+            if lid:
+                linked = candidate_map.get(lid) or fetched_map.get(lid)
+                if linked:
+                    linked_obj = dict(linked)
+                    is_image = linked_obj.get("type") == "image"
+                    if is_image:
+                        b64 = linked_obj.get("image_base64")
+                        r["linked_image"] = b64
+                    r["linked_content"] = linked_obj
+                    logger.debug("Attached linked content %s to chunk %s", lid, r.get("custom_id"))
+                else:
+                    logger.debug("Linked content %s not found for chunk %s", lid, r.get("custom_id"))

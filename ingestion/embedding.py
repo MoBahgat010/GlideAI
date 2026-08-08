@@ -5,9 +5,10 @@ import logging
 from typing import Any
 
 import torch
+from torch.nn import functional as F
 from PIL import Image, UnidentifiedImageError
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
+from transformers import AutoModel, AutoProcessor
 
 logger = logging.getLogger("ingestion.embedding")
 
@@ -15,33 +16,39 @@ class MultimodalEncoder:
     def __init__(self, device: str, batch_size: int, model_name: str):
         self.batch_size = batch_size
 
-        self.text_embeddings = HuggingFaceEmbeddings(
-            model_name=model_name,
-            model_kwargs={"trust_remote_code": True, "device": device},
-            encode_kwargs={"normalize_embeddings": True, "batch_size": batch_size},
-        )
+        self.model_name = model_name
+        self.device = device
+        
+        logger.info("Initializing MultimodalEncoder with model_name=%s on device=%s", model_name, device)
+        self.model = AutoModel.from_pretrained(model_name).to(device).eval()
+        self.processor = AutoProcessor.from_pretrained(model_name)
 
-        self.image_embeddings = self.text_embeddings._client
-        self.d_model = self.image_embeddings.get_sentence_embedding_dimension()
-
-        logger.info("Loaded %s (dim=%s) on device=%s", model_name, self.d_model, self.image_embeddings.device)
-
+        sample_emb = self.encode_text(["dimension check"])[0]
+        self.d_model = len(sample_emb)
+        logger.info("Loaded %s (dim=%s) on device=%s", model_name, self.d_model, device)
 
     def encode_text(self, texts: list[str]) -> list[list[float]]:
         safe_texts = [t if (t and t.strip()) else " " for t in texts]
-        with torch.inference_mode():
-            return self.text_embeddings.embed_documents(safe_texts)
+        inputs = self.processor(text=safe_texts, return_tensors="pt", padding=True, truncation=True).to(self.device)
+        with torch.no_grad():
+            if hasattr(self.model, "get_text_features"):
+                raw = self.model.get_text_features(**inputs)
+            else:
+                raw = self.model(**inputs)
+            features = self._extract_features(raw)
+            normalized = F.normalize(features, dim=-1)
+            return normalized.cpu().tolist()
 
     def encode_image(self, images: list[Image.Image]) -> list[list[float]]:
-        with torch.inference_mode():
-            embeddings = self.image_embeddings.encode(
-                images,
-                batch_size=self.batch_size,
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-            )
-            return embeddings.tolist()
-
+        inputs = self.processor(images=images, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            if hasattr(self.model, "get_image_features"):
+                raw = self.model.get_image_features(**inputs)
+            else:
+                raw = self.model(**inputs)
+            features = self._extract_features(raw)
+            normalized = F.normalize(features, dim=-1)
+            return normalized.cpu().tolist()
 
     def embed_chunks(self, chunks: list[Document]) -> list[dict[str, Any]]:
         results: list[dict[str, Any] | None] = [None] * len(chunks)
@@ -53,14 +60,17 @@ class MultimodalEncoder:
         image_batch: list[Image.Image] = []
 
         for i, chunk in enumerate(chunks):
-            # if chunk.metadata.get("type") == "image":
-            #     pil_image = self._decode_base64_image(chunk.metadata.get("image_path"))
-            #     if pil_image is None:
-            #         logger.warning("Skipping image chunk at index %d: could not decode base64 image data", i)
-            #         continue
-            #     image_indices.append(i)
-            #     image_batch.append(pil_image)
-            # else:
+            if chunk.metadata.get("type") == "image":
+                img_data = chunk.metadata.get("image_path") or chunk.metadata.get("image_base64")
+                pil_image = self._decode_base64_image(img_data)
+                if pil_image is None:
+                    logger.warning("Skipping image chunk at index %d: could not decode image data", i)
+                    text_indices.append(i)
+                    text_batch.append(chunk.page_content)
+                else:
+                    image_indices.append(i)
+                    image_batch.append(pil_image)
+            else:
                 text_indices.append(i)
                 text_batch.append(chunk.page_content)
 
@@ -73,6 +83,19 @@ class MultimodalEncoder:
                 results[idx] = {"document": chunks[idx], "embedding": embedding, "modality": "image"}
 
         return [r for r in results if r is not None]
+
+    @staticmethod
+    def _extract_features(output) -> torch.Tensor:
+        if isinstance(output, torch.Tensor):
+            return output
+
+        for attr in ("image_embeds", "text_embeds", "pooler_output"):
+            val = getattr(output, attr, None)
+            if val is not None:
+                return val
+
+        if hasattr(output, "last_hidden_state"):
+            return output.last_hidden_state[:, 0, :]
 
     @staticmethod
     def _decode_base64_image(data: str | None) -> Image.Image | None:

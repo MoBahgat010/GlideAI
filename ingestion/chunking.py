@@ -7,19 +7,19 @@ class SemanticChunker:
         self.max_chars = max_chars
         self.overlap_chars = overlap_chars
 
-    def chunk(self, document: Document) -> list[Document]:
+    def chunk(self, document: Document, user_id: str = "default") -> list[Document]:
         data: dict[str, Any] = json.loads(document.page_content)
 
         file_name = data.get("file name", "")
         docs: list[Document] = []
 
-        print(f"Chunking document: {file_name}")
+        print(f"Chunking document: {file_name} for user: {user_id}")
 
-        self._visit(node=data, docs=docs, heading_stack=[], file_name=file_name)
+        self._visit(node=data, docs=docs, heading_stack=[], file_name=file_name, user_id=user_id)
 
         return self._merge_small_paragraphs(docs)
 
-    def _visit(self, node: dict, docs: list[Document], heading_stack: list[str], file_name: str):
+    def _visit(self, node: dict, docs: list[Document], heading_stack: list[str], file_name: str, user_id: str):
         node_type = node.get("type")
 
         if node_type in ("heading", "title"):
@@ -28,22 +28,33 @@ class SemanticChunker:
                 heading_stack = heading_stack + [heading]
 
         elif node_type in ("paragraph", "text_block", "list_item", "list item"):
-            docs.extend(self._paragraph_to_docs(node, heading_stack, file_name))
+            docs.extend(self._paragraph_to_docs(node, heading_stack, file_name, user_id))
 
         elif node_type == "table":
-            docs.extend(self._table_to_docs(node, heading_stack, file_name))
+            docs.extend(self._table_to_docs(node, heading_stack, file_name, user_id))
 
         elif node_type in ("image", "figure"):
-            doc = self._image_to_doc(node, heading_stack, file_name)
+            doc = self._image_to_doc(node, heading_stack, file_name, user_id)
 
             if doc:
                 docs.append(doc)
 
         elif node_type == "caption":
-            docs.extend(self._paragraph_to_docs(node, heading_stack, file_name))
+            docs.extend(self._paragraph_to_docs(node, heading_stack, file_name, user_id))
 
         for child in node.get("kids", []):
-            self._visit(child, docs, heading_stack, file_name)
+            self._visit(child, docs, heading_stack, file_name, user_id)
+
+    @staticmethod
+    def _make_chunk_id(user_id: str, file_name: str, raw_id: Any) -> str:
+        raw_str = str(raw_id) if raw_id is not None else ""
+        if raw_str.startswith(f"{user_id}_"):
+            return raw_str
+        if user_id and file_name and raw_str:
+            return f"{user_id}_{file_name}_{raw_str}"
+        elif user_id and file_name:
+            return f"{user_id}_{file_name}"
+        return raw_str
 
     def _get_text(self, node: dict) -> str:
         """
@@ -57,7 +68,7 @@ class SemanticChunker:
             or ""
         ).strip()
 
-    def _paragraph_to_docs(self, node: dict, headings: list[str], file_name: str) -> list[Document]:
+    def _paragraph_to_docs(self, node: dict, headings: list[str], file_name: str, user_id: str) -> list[Document]:
         text = self._get_text(node)
 
         if not text:
@@ -67,23 +78,26 @@ class SemanticChunker:
 
         full_text = f"{prefix}\n\n{text}" if prefix else text
 
+        raw_id = node.get("id")
+        chunk_id = self._make_chunk_id(user_id, file_name, raw_id)
         metadata = {
-            "id": node.get("id"),
+            "custom_id": chunk_id,
             "type": node.get("type"),
             "page": node.get("page number"),
             "bbox": node.get("bounding box"),
             "file_name": file_name,
         }
 
-        if node.get("linked content id", None):
-            metadata["linked_content_id"] = node["linked content id"]
+        raw_linked = node.get("linked content id")
+        if raw_linked:
+            metadata["linked_content_id"] = self._make_chunk_id(user_id, file_name, raw_linked)
 
         return self._split(
             full_text,
             metadata=metadata,
         )
 
-    def _table_to_docs(self, node: dict, headings: list[str], file_name: str) -> list[Document]:
+    def _table_to_docs(self, node: dict, headings: list[str], file_name: str, user_id: str) -> list[Document]:
 
         rows = []
 
@@ -110,16 +124,26 @@ class SemanticChunker:
         if prefix:
             table_text = prefix + "\n\n" + table_text
 
-        return self._split(
-            table_text,
-            metadata={
-                "id": node.get("id"),
-                "type": "table",
-                "page": node.get("page number"),
-                "bbox": node.get("bounding box"),
-                "file_name": file_name,
-            },
-        )
+        raw_id = node.get("id")
+        chunk_id = self._make_chunk_id(user_id, file_name, raw_id)
+        metadata = {
+            "custom_id": chunk_id,
+            "type": "table",
+            "page": node.get("page number"),
+            "bbox": node.get("bounding box"),
+            "file_name": file_name,
+        }
+
+        raw_linked = node.get("linked content id")
+        if raw_linked:
+            metadata["linked_content_id"] = self._make_chunk_id(user_id, file_name, raw_linked)
+
+        return [
+            Document(
+                page_content=table_text,
+                metadata=metadata,
+            )
+        ]
 
 
     def _image_to_doc(
@@ -127,6 +151,7 @@ class SemanticChunker:
         node: dict,
         headings: list[str],
         file_name: str,
+        user_id: str,
     ):
         caption = (
             node.get("caption")
@@ -140,17 +165,25 @@ class SemanticChunker:
 
         # OpenDataLoader stores base64 image under "data"; "source" may also exist
         image_path = node.get("data") or node.get("source") or node.get("alt_source")
+        raw_id = node.get("id")
+        chunk_id = self._make_chunk_id(user_id, file_name, raw_id)
+
+        metadata = {
+            "custom_id": chunk_id,
+            "type": "image",
+            "page": node.get("page number"),
+            "bbox": node.get("bounding box"),
+            "image_base64": image_path,
+            "file_name": file_name,
+        }
+
+        raw_linked = node.get("linked content id")
+        if raw_linked:
+            metadata["linked_content_id"] = self._make_chunk_id(user_id, file_name, raw_linked)
 
         return Document(
             page_content=text,
-            metadata={
-                "id": node.get("id"),
-                "type": "image",
-                "page": node.get("page number"),
-                "bbox": node.get("bounding box"),
-                "image_path": image_path,
-                "file_name": file_name,
-            },
+            metadata=metadata,
         )
 
     def _split(

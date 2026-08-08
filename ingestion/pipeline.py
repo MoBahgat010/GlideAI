@@ -8,7 +8,7 @@ from ingestion.embedding import MultimodalEncoder
 from ingestion.loader import PDFLoader
 from torch.cuda import empty_cache, ipc_collect
 from ingestion.stt import RevAITranscriber, is_media_file
-from storage.weaviate import WeaviateVDB
+from storage import VDB, WeaviateVDB
 
 logger = logging.getLogger("ingestion.pipeline")
 
@@ -17,20 +17,20 @@ class IngestionPipeline:
         self.loader = PDFLoader()
         self.chunker = SemanticChunker(MAX_CHARS, OVERLAP_CHARS)
         self.encoder = MultimodalEncoder(DEVICE, EMBED_BATCH, EMBEDDING_MODEL)
-        self.vdb = WeaviateVDB(
+        self.vdb = VDB(strategy=WeaviateVDB(
             endpoint=config.WEAVIATE_REST_ENDPOINT,
             api_key=config.WEAVIATE_API_KEY,
             index=INDEX_NAME,
             dimension=self.encoder.d_model,
-        )
+        ))
         # self.transcriber = RevAITranscriber()
 
         self.batch_size = batch_size
 
-    def run_pipeline(self, folder_path: str):
+    def run_pipeline(self, folder_path: str, user_id: str = "default"):
         docs = self.loader.load(folder_path)
         for doc in docs:
-            chunks = self.chunker.chunk(doc)
+            chunks = self.chunker.chunk(doc, user_id=user_id)
             del doc
             gc.collect()
             for i in range(0, len(chunks), self.batch_size):

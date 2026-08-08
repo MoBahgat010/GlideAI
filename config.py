@@ -9,6 +9,8 @@ MAX_CHARS = int(os.getenv("MAX_CHARS", "1000"))
 OVERLAP_CHARS = int(os.getenv("OVERLAP_CHARS", "200"))
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "jinaai/jina-clip-v2")
+RERANKER_MODEL = os.getenv("RERANKER_MODEL", "Svngoku/jina-reranker-m0-bnb-4bit")
+
 INDEX_NAME = os.getenv("INDEX_NAME", "personal-trials")
 QWEN_SERVER_URL = os.getenv("QWEN_SERVER_URL", "http://127.0.0.1:8080")
 QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen")

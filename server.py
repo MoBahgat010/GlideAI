@@ -26,15 +26,11 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from config import (
-    BASE_URL,
     CHUNKS_DIR,
     DEVICE,
     EMBED_BATCH,
     EMBEDDING_MODEL,
-    HEAVY_WEIGHT,
     INDEX_NAME,
-    LIGHT_WEIGHT,
-    NVIDIA_API_KEY,
     QWEN_MODEL,
     QWEN_SERVER_URL,
     RERANK_TOP_K,
@@ -42,6 +38,8 @@ from config import (
     UPLOAD_DIR,
     WEAVIATE_API_KEY,
     WEAVIATE_REST_ENDPOINT,
+    RERANKER_MODEL,
+    HF_TOKEN
 )
 
 from ingestion.embedding import MultimodalEncoder
@@ -49,8 +47,10 @@ from retrieval.answer import AnswerGenerator
 from retrieval.pipeline import RetrievalPipeline
 from retrieval.reranker import HybridReranker
 from storage.weaviate import WeaviateVDB
-
+from huggingface_hub import login
 from tasks import celery_app, run_ingestion
+
+login(HF_TOKEN)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,7 +76,7 @@ def _get_retrieval() -> tuple[RetrievalPipeline, AnswerGenerator]:
     global _retrieval_pipeline, _answer_generator
     if _retrieval_pipeline is None or _answer_generator is None:
         logger.info("Initializing retrieval pipeline and answer generator...")
-        reranker = HybridReranker()
+        reranker = HybridReranker(model_name=RERANKER_MODEL)
         encoder = MultimodalEncoder(device=DEVICE, batch_size=EMBED_BATCH, model_name=EMBEDDING_MODEL)
         vdb = WeaviateVDB(
             endpoint=WEAVIATE_REST_ENDPOINT,
