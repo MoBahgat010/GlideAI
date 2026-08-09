@@ -12,7 +12,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 18px 32px;
+  padding: 14px 28px;
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(12px);
   position: sticky;
@@ -22,7 +22,7 @@
 .logo {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   font-size: 18px;
   font-weight: 700;
   letter-spacing: -0.4px;
@@ -41,6 +41,12 @@
   50%      { box-shadow: 0 0 24px rgba(108,99,255,0.5); }
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
 /* ── tabs ───────────────────────────────────────────────────────────────── */
 .tabs {
   display: flex;
@@ -50,7 +56,7 @@
   padding: 4px;
 }
 .tab {
-  padding: 8px 20px;
+  padding: 8px 18px;
   border-radius: 6px;
   font-size: 13px;
   font-weight: 600;
@@ -66,16 +72,60 @@
   box-shadow: 0 1px 6px rgba(0,0,0,0.4);
 }
 
+/* ── auth status badge ─────────────────────────────────────────────────── */
+.auth-badge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.username-tag {
+  font-weight: 600;
+  color: var(--accent2);
+}
+
 /* ── main content ───────────────────────────────────────────────────────── */
 .content {
   flex: 1;
-  padding: 32px;
-  max-width: 900px;
+  padding: 28px;
+  max-width: 1050px;
   width: 100%;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 24px;
+}
+
+/* ── session bar ────────────────────────────────────────────────────────── */
+.session-bar {
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.session-selector {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+}
+.session-select {
+  padding: 8px 14px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+}
+.session-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* ── upload zone ────────────────────────────────────────────────────────── */
@@ -168,7 +218,43 @@
 }
 .progress-label { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
 
-/* ── ask tab ────────────────────────────────────────────────────────────── */
+/* ── ask tab & chat history ──────────────────────────────────────────────── */
+.chat-history {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 420px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+.chat-bubble {
+  padding: 14px 18px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.chat-bubble.user {
+  background: rgba(108,99,255,0.15);
+  border: 1px solid rgba(108,99,255,0.3);
+  align-self: flex-end;
+  max-width: 80%;
+}
+.chat-bubble.assistant {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  align-self: flex-start;
+  max-width: 90%;
+}
+.chat-role {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
 .ask-form {
   display: flex;
   gap: 12px;
@@ -278,3 +364,62 @@
 .log-line.DONE    { color: var(--success); }
 .log-line.FAILED  { color: var(--error); }
 .log-line.active  { color: var(--accent2); }
+
+/* ── Modal dialog ───────────────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.65);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal-card {
+  width: 90%;
+  max-width: 480px;
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.modal-title { font-size: 18px; font-weight: 700; }
+.modal-close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 20px;
+  cursor: pointer;
+}
+.input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.input-group label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.form-input {
+  padding: 10px 14px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  outline: none;
+}
+.memory-box {
+  background: rgba(0,0,0,0.2);
+  padding: 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.6;
+}

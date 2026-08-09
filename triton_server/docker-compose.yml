@@ -1,0 +1,35 @@
+services:
+  triton:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: enterprise-rag-triton:latest
+    runtime: nvidia
+    env_file:
+      - ../.env
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+    ports:
+      - "8000:8000"   # HTTP inference
+      - "8001:8001"   # gRPC inference
+      - "8002:8002"   # Prometheus metrics
+    volumes:
+      - ./models:/models:ro
+      # Reuse the host HuggingFace cache so models are not re-downloaded
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+    command: >
+      tritonserver
+      --model-repository=/models
+      --log-verbose=0
+      --allow-http=true
+      --allow-grpc=true
+      --allow-metrics=true
+      --strict-model-config=false
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 120s   # allow time for model loading
+    restart: unless-stopped

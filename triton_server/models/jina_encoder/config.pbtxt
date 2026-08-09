@@ -1,0 +1,39 @@
+name: "jina_encoder"
+backend: "python"
+max_batch_size: 32
+
+input [
+  {
+    name: "TEXT"
+    data_type: TYPE_BYTES
+    dims: [ 1 ]
+    optional: true
+  },
+  {
+    name: "IMAGE_BASE64"
+    data_type: TYPE_BYTES
+    dims: [ 1 ]
+    optional: true
+  }
+]
+
+output [
+  {
+    name: "EMBEDDING"
+    data_type: TYPE_FP32
+    dims: [ 1024 ]
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [ 8, 16, 32 ]
+  max_queue_delay_microseconds: 10000
+}
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]

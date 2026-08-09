@@ -17,8 +17,9 @@ function genId() {
 }
 
 // ── Upload logic ───────────────────────────────────────────────────────────
-async function uploadFileInChunks(file, uploadId, onProgress) {
+async function uploadFileInChunks(file, uploadId, onProgress, token) {
   const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
+  const headers = token ? { Authorization: `Bearer ${token}` } : {}
 
   for (let i = 0; i < totalChunks; i++) {
     const slice = file.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE)
@@ -29,7 +30,7 @@ async function uploadFileInChunks(file, uploadId, onProgress) {
     form.append('total_chunks', String(totalChunks))
     form.append('filename', file.name)
 
-    const res = await fetch('/api/ingest/chunk', { method: 'POST', body: form })
+    const res = await fetch('/api/ingest/chunk', { method: 'POST', body: form, headers })
     if (!res.ok) throw new Error(`Chunk ${i} failed: ${res.statusText}`)
 
     onProgress((i + 1) / totalChunks * 0.5)   // first half = upload
@@ -41,7 +42,7 @@ async function uploadFileInChunks(file, uploadId, onProgress) {
   form.append('filename', file.name)
   form.append('total_chunks', String(totalChunks))
 
-  const res = await fetch('/api/ingest/finalize', { method: 'POST', body: form })
+  const res = await fetch('/api/ingest/finalize', { method: 'POST', body: form, headers })
   if (!res.ok) throw new Error(`Finalize failed: ${res.statusText}`)
   const data = await res.json()
   return data.task_id
@@ -137,8 +138,185 @@ function SourceCard({ result, index }) {
   )
 }
 
+// ── Auth Modal Component ───────────────────────────────────────────────────
+function AuthModal({ isOpen, onClose, onSuccess }) {
+  const [mode, setMode] = useState('login')
+  const [username, setUsername] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  if (!isOpen) return null
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    setError('')
+    setLoading(true)
+
+    try {
+      if (mode === 'register') {
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, email, password }),
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.detail || 'Registration failed')
+        // Auto login
+        setMode('login')
+      }
+
+      // Login
+      const form = new URLSearchParams()
+      form.append('username', username)
+      form.append('password', password)
+
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: form,
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Login failed')
+
+      localStorage.setItem('graphrag_token', data.access_token)
+      localStorage.setItem('graphrag_username', data.username)
+      onSuccess(data.access_token, data.username)
+      onClose()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal-card glass">
+        <div className="modal-header">
+          <span className="modal-title">{mode === 'login' ? '🔐 Sign In' : '✨ Register Account'}</span>
+          <button className="modal-close" onClick={onClose}>×</button>
+        </div>
+
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div className="input-group">
+            <label>Username</label>
+            <input
+              className="form-input"
+              type="text"
+              required
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+            />
+          </div>
+
+          {mode === 'register' && (
+            <div className="input-group">
+              <label>Email Address</label>
+              <input
+                className="form-input"
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+              />
+            </div>
+          )}
+
+          <div className="input-group">
+            <label>Password</label>
+            <input
+              className="form-input"
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
+
+          {error && <div style={{ color: 'var(--error)', fontSize: 13 }}>⚠ {error}</div>}
+
+          <button className="btn btn-primary" type="submit" disabled={loading}>
+            {loading ? 'Processing…' : mode === 'login' ? 'Sign In' : 'Create Account'}
+          </button>
+        </form>
+
+        <div style={{ fontSize: 13, textAlign: 'center', color: 'var(--text-muted)' }}>
+          {mode === 'login' ? (
+            <span>Don't have an account? <a href="#" style={{ color: 'var(--accent2)' }} onClick={() => setMode('register')}>Register</a></span>
+          ) : (
+            <span>Already have an account? <a href="#" style={{ color: 'var(--accent2)' }} onClick={() => setMode('login')}>Sign In</a></span>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Memories Modal Component ───────────────────────────────────────────────
+function MemoriesModal({ isOpen, onClose, memoryData }) {
+  if (!isOpen || !memoryData) return null
+
+  const episodic = memoryData.episodic_memory || {}
+  const semantic = memoryData.semantic_memory || {}
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal-card glass" style={{ maxWidth: 640 }}>
+        <div className="modal-header">
+          <span className="modal-title">🧠 Extracted Memory Profile</span>
+          <button className="modal-close" onClick={onClose}>×</button>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxHeight: 420, overflowY: 'auto' }}>
+          <div>
+            <h4 style={{ fontSize: 14, color: 'var(--accent2)', marginBottom: 6 }}>📖 Episodic Memory</h4>
+            <div className="memory-box">
+              <p><strong>Summary:</strong> {episodic.summary || 'No episodic summary extracted yet.'}</p>
+              {episodic.key_events && episodic.key_events.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <strong>Key Events:</strong>
+                  <ul style={{ paddingLeft: 18, marginTop: 4 }}>
+                    {episodic.key_events.map((ev, i) => <li key={i}>{ev}</li>)}
+                  </ul>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <h4 style={{ fontSize: 14, color: '#22d3ee', marginBottom: 6 }}>💡 Semantic Memory</h4>
+            <div className="memory-box">
+              {semantic.facts && semantic.facts.length > 0 ? (
+                <div>
+                  <strong>Learned Facts:</strong>
+                  <ul style={{ paddingLeft: 18, marginTop: 4 }}>
+                    {semantic.facts.map((fact, i) => <li key={i}>{fact}</li>)}
+                  </ul>
+                </div>
+              ) : (
+                <p>No semantic facts extracted yet.</p>
+              )}
+
+              {semantic.preferences && semantic.preferences.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <strong>User Preferences:</strong>
+                  <ul style={{ paddingLeft: 18, marginTop: 4 }}>
+                    {semantic.preferences.map((pref, i) => <li key={i}>{pref}</li>)}
+                  </ul>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── IngestTab ──────────────────────────────────────────────────────────────
-function IngestTab() {
+function IngestTab({ token }) {
   const [files, setFiles] = useState([])
   const [dragOver, setDragOver] = useState(false)
   const [logLines, setLogLines] = useState([])
@@ -196,7 +374,7 @@ function IngestTab() {
     try {
       const taskId = await uploadFileInChunks(file, uploadId, (pct) => {
         setFiles(prev => prev.map(f => f.uploadId !== uploadId ? f : { ...f, pct, message: `Uploading… ${Math.round(pct * 100)}%` }))
-      })
+      }, token)
       addLog(`✓ Upload complete — ingestion task dispatched`, 'DONE')
       addLog(`  Task ID: ${taskId}`)
       setFiles(prev => prev.map(f => f.uploadId !== uploadId ? f : { ...f, stage: 'QUEUED', message: 'Ingestion queued…', pct: 0.5 }))
@@ -205,7 +383,7 @@ function IngestTab() {
       addLog(`✗ ${file.name}: ${err.message}`, 'FAILED')
       setFiles(prev => prev.map(f => f.uploadId !== uploadId ? f : { ...f, status: 'error', message: err.message }))
     }
-  }, [addLog, startPolling])
+  }, [addLog, startPolling, token])
 
   const handleDrop = useCallback((e) => {
     e.preventDefault()
@@ -250,7 +428,7 @@ function IngestTab() {
 }
 
 // ── AskTab ─────────────────────────────────────────────────────────────────
-function AskTab() {
+function AskTab({ activeSessionId, token, history, setHistory }) {
   const [query, setQuery] = useState('')
   const [answer, setAnswer] = useState('')
   const [sources, setSources] = useState([])
@@ -260,19 +438,28 @@ function AskTab() {
 
   const handleAsk = useCallback(async () => {
     if (!query.trim() || streaming) return
+    const userMsg = query.trim()
+    setQuery('')
     setAnswer('')
     setSources([])
     setError('')
     setStreaming(true)
 
+    // Optimistically add user message to transcript
+    setHistory(prev => [...prev, { role: 'user', content: userMsg }])
+
     try {
       const ctrl = new AbortController()
       abortRef.current = ctrl
 
-      const res = await fetch('/api/ask', {
+      const endpoint = activeSessionId ? `/api/sessions/${activeSessionId}/ask` : '/api/ask'
+      const headers = { 'Content-Type': 'application/json' }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+
+      const res = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query }),
+        headers,
+        body: JSON.stringify({ query: userMsg }),
         signal: ctrl.signal,
       })
 
@@ -281,6 +468,7 @@ function AskTab() {
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
       let buf = ''
+      let fullText = ''
 
       while (true) {
         const { done, value } = await reader.read()
@@ -295,9 +483,14 @@ function AskTab() {
           try {
             const msg = JSON.parse(part.slice(5).trim())
             if (msg.type === 'token') {
-              setAnswer(prev => prev + msg.content)
+              fullText += msg.content
+              setAnswer(fullText)
             } else if (msg.type === 'done') {
               setSources(msg.results || [])
+              // Append assistant message to local history
+              if (fullText) {
+                setHistory(prev => [...prev, { role: 'assistant', content: fullText }])
+              }
             } else if (msg.type === 'error') {
               setError(msg.content)
             }
@@ -310,7 +503,7 @@ function AskTab() {
       setStreaming(false)
       abortRef.current = null
     }
-  }, [query, streaming])
+  }, [query, streaming, activeSessionId, token, setHistory])
 
   const handleKey = (e) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleAsk()
@@ -318,6 +511,17 @@ function AskTab() {
 
   return (
     <>
+      {history.length > 0 && (
+        <div className="chat-history glass" style={{ padding: 16 }}>
+          {history.map((msg, i) => (
+            <div key={i} className={`chat-bubble ${msg.role}`}>
+              <div className="chat-role">{msg.role}</div>
+              <div>{msg.content}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="ask-form">
         <div className="ask-input-wrap">
           <label htmlFor="ask-query">Your question</label>
@@ -325,7 +529,7 @@ function AskTab() {
             id="ask-query"
             className="ask-input"
             rows={3}
-            placeholder="Ask anything about your indexed documents…"
+            placeholder={activeSessionId ? "Ask a question in this session…" : "Ask anything about your indexed documents…"}
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={handleKey}
@@ -344,7 +548,7 @@ function AskTab() {
       </div>
 
       <div className={`answer-box glass ${!answer && !streaming ? 'empty' : ''}`}>
-        {answer || (!streaming && <span>Your answer will appear here…</span>)}
+        {answer || (!streaming && <span>Your answer will stream here…</span>)}
         {streaming && <span className="answer-cursor" />}
       </div>
 
@@ -369,6 +573,116 @@ function AskTab() {
 // ── App ────────────────────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState('ingest')
+  const [token, setToken] = useState(() => localStorage.getItem('graphrag_token') || '')
+  const [username, setUsername] = useState(() => localStorage.getItem('graphrag_username') || '')
+  const [authModalOpen, setAuthModalOpen] = useState(false)
+  
+  // Sessions state
+  const [sessions, setSessions] = useState([])
+  const [activeSessionId, setActiveSessionId] = useState('')
+  const [history, setHistory] = useState([])
+  const [memoryModalOpen, setMemoryModalOpen] = useState(false)
+  const [memoryData, setMemoryData] = useState(null)
+
+  // Load sessions on auth
+  useEffect(() => {
+    if (!token) return
+    fetch('/api/sessions', {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then(res => res.ok ? res.json() : [])
+      .then(data => {
+        setSessions(data)
+        if (data.length > 0 && !activeSessionId) {
+          setActiveSessionId(data[0].session_id)
+        }
+      })
+      .catch(err => console.error('Failed to load sessions:', err))
+  }, [token])
+
+  // Load active session history
+  useEffect(() => {
+    if (!activeSessionId || !token) {
+      setHistory([])
+      return
+    }
+    fetch(`/api/sessions/${activeSessionId}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (data && data.history) {
+          setHistory(data.history)
+        }
+      })
+      .catch(err => console.error('Failed to load session history:', err))
+  }, [activeSessionId, token])
+
+  const handleCreateSession = async () => {
+    if (!token) {
+      setAuthModalOpen(true)
+      return
+    }
+    try {
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ title: `Session ${sessions.length + 1}` }),
+      })
+      if (!res.ok) throw new Error('Failed to create session')
+      const newSess = await res.json()
+      setSessions(prev => [newSess, ...prev])
+      setActiveSessionId(newSess.session_id)
+      setHistory([])
+    } catch (err) {
+      alert(err.message)
+    }
+  }
+
+  const handleEndSession = async () => {
+    if (!activeSessionId || !token) return
+    try {
+      const res = await fetch(`/api/sessions/${activeSessionId}/end`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) throw new Error('Failed to end session')
+      const data = await res.json()
+      alert(`Session ended! Celery task ${data.task_id} dispatched for memory extraction.`)
+
+      setSessions(prev => prev.map(s => s.session_id !== activeSessionId ? s : { ...s, status: 'ending' }))
+    } catch (err) {
+      alert(err.message)
+    }
+  }
+
+  const handleViewMemories = async () => {
+    if (!activeSessionId || !token) return
+    try {
+      const res = await fetch(`/api/sessions/${activeSessionId}/memories`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) throw new Error('Failed to load memories')
+      const data = await res.json()
+      setMemoryData(data)
+      setMemoryModalOpen(true)
+    } catch (err) {
+      alert(err.message)
+    }
+  }
+
+  const handleLogout = () => {
+    localStorage.removeItem('graphrag_token')
+    localStorage.removeItem('graphrag_username')
+    setToken('')
+    setUsername('')
+    setSessions([])
+    setActiveSessionId('')
+    setHistory([])
+  }
 
   return (
     <div className="app">
@@ -377,6 +691,7 @@ export default function App() {
           <span className="logo-dot" />
           GraphRAG
         </div>
+
         <div className="tabs" role="tablist">
           <button
             id="tab-ingest"
@@ -395,11 +710,86 @@ export default function App() {
             💬 Ask
           </button>
         </div>
+
+        <div className="header-right">
+          {token ? (
+            <div className="auth-badge">
+              <span>👤 <span className="username-tag">{username}</span></span>
+              <button className="btn btn-ghost" style={{ padding: '6px 12px', fontSize: 12 }} onClick={handleLogout}>Logout</button>
+            </div>
+          ) : (
+            <button className="btn btn-primary" style={{ padding: '6px 14px', fontSize: 13 }} onClick={() => setAuthModalOpen(true)}>
+              Sign In / Register
+            </button>
+          )}
+        </div>
       </header>
 
+      {/* Session toolbar if authenticated */}
+      {token && (
+        <div style={{ maxWidth: 1050, width: '100%', margin: '16px auto 0', padding: '0 28px' }}>
+          <div className="session-bar glass">
+            <div className="session-selector">
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>SESSION:</span>
+              <select
+                className="session-select"
+                value={activeSessionId}
+                onChange={(e) => setActiveSessionId(e.target.value)}
+              >
+                {sessions.map(s => (
+                  <option key={s.session_id} value={s.session_id}>
+                    {s.title} ({s.status})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="session-actions">
+              <button className="btn btn-ghost" style={{ padding: '6px 12px', fontSize: 12 }} onClick={handleCreateSession}>
+                + New Session
+              </button>
+              {activeSessionId && (
+                <>
+                  <button className="btn btn-ghost" style={{ padding: '6px 12px', fontSize: 12 }} onClick={handleViewMemories}>
+                    🧠 View Memories
+                  </button>
+                  <button className="btn btn-ghost" style={{ padding: '6px 12px', fontSize: 12, color: 'var(--error)' }} onClick={handleEndSession}>
+                    ⏹ End Session
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <main className="content" role="tabpanel">
-        {tab === 'ingest' ? <IngestTab /> : <AskTab />}
+        {tab === 'ingest' ? (
+          <IngestTab token={token} />
+        ) : (
+          <AskTab
+            activeSessionId={activeSessionId}
+            token={token}
+            history={history}
+            setHistory={setHistory}
+          />
+        )}
       </main>
+
+      <AuthModal
+        isOpen={authModalOpen}
+        onClose={() => setAuthModalOpen(false)}
+        onSuccess={(tok, uname) => {
+          setToken(tok)
+          setUsername(uname)
+        }}
+      />
+
+      <MemoriesModal
+        isOpen={memoryModalOpen}
+        onClose={() => setMemoryModalOpen(false)}
+        memoryData={memoryData}
+      />
     </div>
   )
 }
