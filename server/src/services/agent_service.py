@@ -10,7 +10,7 @@ from config import (
     WEAVIATE_API_KEY,
     WEAVIATE_REST_ENDPOINT,
     HF_TOKEN,
-    TRITON_URL,
+    TRITON_GRPC_URL,
 )
 
 from RAG_Pipeline.ingestion.embedding import MultimodalEncoder
@@ -36,10 +36,10 @@ def get_agentic_rag() -> tuple[RetrievalPipeline, AgenticAnswerGenerator]:
     """Retrieve or initialize the RAG pipeline and Agentic RAG answer generator."""
     global _retrieval_pipeline, _answer_generator
     if _retrieval_pipeline is None or _answer_generator is None:
-        logger.info("Initializing Retrieval Pipeline and Agentic RAG Answer Generator via Triton Server (%s)...", TRITON_URL)
+        logger.info("Initializing Retrieval Pipeline and Agentic RAG Answer Generator via Triton Server (%s)...", TRITON_GRPC_URL)
         
-        reranker = HybridReranker(url=TRITON_URL)
-        encoder = MultimodalEncoder(url=TRITON_URL)
+        reranker = HybridReranker(url=TRITON_GRPC_URL)
+        encoder = MultimodalEncoder(url=TRITON_GRPC_URL)
 
         vdb = WeaviateVDB(
             endpoint=WEAVIATE_REST_ENDPOINT,

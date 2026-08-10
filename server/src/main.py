@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-from config import TRITON_URL
+from config import TRITON_HTTP_URL
 from db.mongo import MongoManager
 from db.redis import close_redis
 from routers.auth import router as auth_router
@@ -46,12 +46,12 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing GraphRAG FastAPI Application...")
 
     # Check Triton Server status on startup; fail fast if Triton is down
-    if not check_triton_health(TRITON_URL):
-        error_msg = f"❌ Triton Inference Server at '{TRITON_URL}' is NOT running or ready! Please start Triton server first."
+    if not check_triton_health(TRITON_HTTP_URL):
+        error_msg = f"❌ Triton Inference Server at '{TRITON_HTTP_URL}' is NOT running or ready! Please start Triton server first."
         logger.error(error_msg)
         raise RuntimeError(error_msg)
 
-    logger.info("✅ Triton Inference Server health check passed (%s).", TRITON_URL)
+    logger.info("✅ Triton Inference Server health check passed (%s).", TRITON_HTTP_URL)
 
     try:
         await MongoManager.connect()

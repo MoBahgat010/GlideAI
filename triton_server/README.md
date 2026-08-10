@@ -104,7 +104,7 @@ Add to your `.env`:
 
 ```env
 USE_TRITON=true
-TRITON_URL=localhost:8000
+TRITON_GRPC_URL=localhost:8000
 ```
 
 When the main refactor plan is implemented, the `RAGContainer.init()` method

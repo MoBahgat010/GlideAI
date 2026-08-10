@@ -16,10 +16,10 @@ if HF_TOKEN:
     login(HF_TOKEN)
 
 print("=" * 60)
-print("Downloading jinaai/jina-clip-v2 (encoder)...")
+print("Downloading google/siglip-large-patch16-384 (encoder)...")
 print("=" * 60)
-AutoModel.from_pretrained("jinaai/jina-clip-v2", trust_remote_code=True)
-AutoProcessor.from_pretrained("jinaai/jina-clip-v2", trust_remote_code=True)
+AutoModel.from_pretrained("google/siglip-large-patch16-384", trust_remote_code=True)
+AutoProcessor.from_pretrained("google/siglip-large-patch16-384", trust_remote_code=True)
 print("Done.\n")
 
 print("=" * 60)

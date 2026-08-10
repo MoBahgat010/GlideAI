@@ -244,7 +244,3 @@ class AgenticAnswerGenerator:
         if session_id and self.working_memory and full_response:
             await self.working_memory.add_message(session_id, "user", query)
             await self.working_memory.add_message(session_id, "assistant", full_response)
-
-
-# Alias for backward compatibility
-AnswerGenerator = AgenticAnswerGenerator

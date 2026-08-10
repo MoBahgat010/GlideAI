@@ -20,7 +20,7 @@ import redis
 import pymongo
 from openai import OpenAI
 from urllib import request
-from config import MONGODB_URL, MONGODB_DB_NAME, QWEN_SERVER_URL, QWEN_MODEL, TRITON_URL
+from config import MONGODB_URL, MONGODB_DB_NAME, QWEN_SERVER_URL, QWEN_MODEL, TRITON_HTTP_URL
 
 def check_triton_health(url: str) -> bool:
     """Check if Triton Inference Server is running and ready via HTTP GET."""
@@ -32,8 +32,8 @@ def check_triton_health(url: str) -> bool:
     except Exception:
         return False
 
-if not check_triton_health(TRITON_URL):
-    raise ConnectionError("Triton server is not running at %s", TRITON_URL)
+if not check_triton_health(TRITON_HTTP_URL):
+    raise ConnectionError("Triton server is not running at %s", TRITON_HTTP_URL)
 
 celery_app = Celery(
     "tasks",

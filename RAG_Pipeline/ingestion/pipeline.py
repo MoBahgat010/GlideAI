@@ -2,7 +2,7 @@ import gc
 import logging
 
 import config
-from config import EMBED_BATCH, INDEX_NAME, MAX_CHARS, OVERLAP_CHARS, TRITON_URL
+from config import EMBED_BATCH, INDEX_NAME, MAX_CHARS, OVERLAP_CHARS, TRITON_GRPC_URL
 from RAG_Pipeline.ingestion.chunking import SemanticChunker
 from RAG_Pipeline.ingestion.embedding import MultimodalEncoder
 from RAG_Pipeline.ingestion.loader import PDFLoader
@@ -14,7 +14,7 @@ class IngestionPipeline:
     def __init__(self, batch_size: int = EMBED_BATCH):
         self.loader = PDFLoader()
         self.chunker = SemanticChunker(MAX_CHARS, OVERLAP_CHARS)
-        self.encoder = MultimodalEncoder(url=TRITON_URL)
+        self.encoder = MultimodalEncoder(url=TRITON_GRPC_URL)
 
         self.vdb = VDB(strategy=WeaviateVDB(
             endpoint=config.WEAVIATE_REST_ENDPOINT,

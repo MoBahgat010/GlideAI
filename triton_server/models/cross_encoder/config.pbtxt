@@ -1,0 +1,47 @@
+name: "cross_encoder"
+backend: "python"
+
+max_batch_size: 4
+
+dynamic_batching {
+  preferred_batch_size: [ 2, 4 ]
+  max_queue_delay_microseconds: 10000
+}
+
+input [
+  {
+    name: "QUERY"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+  },
+  {
+    name: "CANDIDATES"
+    data_type: TYPE_STRING
+    dims: [ -1 ]
+  }
+]
+
+output [
+  {
+    name: "SCORES"
+    data_type: TYPE_FP32
+    dims: [ -1 ]
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+    rate_limiter {
+      resources [
+        {
+          name: "GPU_MEMORY"
+          count: 1500
+        }
+      ]
+      priority: 1
+    }
+  }
+]

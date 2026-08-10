@@ -8,7 +8,7 @@ DEVICE = os.getenv("DEVICE", "cuda")
 MAX_CHARS = int(os.getenv("MAX_CHARS", "1000"))
 OVERLAP_CHARS = int(os.getenv("OVERLAP_CHARS", "200"))
 
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "jinaai/jina-clip-v2")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "google/siglip-large-patch16-384")
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "jinaai/jina-reranker-m0")
 
 INDEX_NAME = os.getenv("INDEX_NAME", "personal-trials")
@@ -48,4 +48,5 @@ JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 
 # ── Triton Inference Server ────────────────────────────────────────────────────
-TRITON_URL = os.getenv("TRITON_URL", "localhost:8000")
+TRITON_HTTP_URL = os.getenv("TRITON_HTTP_URL", "localhost:8000")
+TRITON_GRPC_URL = os.getenv("TRITON_GRPC_URL", "localhost:8001")
