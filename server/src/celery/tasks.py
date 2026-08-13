@@ -2,8 +2,8 @@ import logging
 import sys
 from pathlib import Path
 from celery import Celery
+from .extraction_pompt import EXTRACTION_PROMPT
 
-# Ensure the project root is on sys.path for Celery's forked worker processes
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 logging.basicConfig(
@@ -23,15 +23,18 @@ from config import (
     API_KEY,
     TRITON_HTTP_URL,
 )
-from RAG_Pipeline.ingestion.pipeline import IngestionPipeline
+from RAG_Pipeline.ingestion.execute import ingestion_pipeline
 import json
 import redis
 import pymongo
 from openai import OpenAI
 from urllib import request
 
+redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+mongo_client = pymongo.MongoClient(MONGODB_URL)
+db = mongo_client[MONGODB_DB_NAME]
+
 def check_triton_health(url: str) -> bool:
-    """Check if Triton Inference Server is running and ready via HTTP GET."""
     health_url = f"{url}/v2/health/ready"
     try:
         req = request.Request(health_url, method="GET")
@@ -49,14 +52,6 @@ celery_app = Celery(
     backend=REDIS_URL,
 )
 
-_ingestion_pipeline: IngestionPipeline | None = None
-
-def get_ingestion_pipeline() -> IngestionPipeline:
-    global _ingestion_pipeline
-    if _ingestion_pipeline is None:
-        _ingestion_pipeline = IngestionPipeline(batch_size=EMBED_BATCH)
-    return _ingestion_pipeline
-
 
 @celery_app.task(bind=True)
 def run_ingestion(self, job_id: str, storage_keys: str) -> dict:
@@ -72,7 +67,7 @@ def run_ingestion(self, job_id: str, storage_keys: str) -> dict:
             meta={"stage": "PROCESSING", "message": "Extracting text and chunking...", "pct": 0.3},
         )
 
-        get_ingestion_pipeline().run_pipeline(storage_keys)
+        ingestion_pipeline.run_pipeline(storage_keys)
 
         self.update_state(
             state="PROGRESS",
@@ -90,25 +85,14 @@ def run_ingestion(self, job_id: str, storage_keys: str) -> dict:
 
 @celery_app.task(bind=True)
 def extract_session_memory(self, session_id: str, user_id: str | None = None) -> dict:
-    """
-    Celery task run after user closes a session.
-    Extracts episodic memory (events, narrative) and semantic memory (facts, concepts)
-    from working memory history and persists them into MongoDB using SUMMARIZER model.
-    """
-
     logger.info("Starting memory extraction for session_id=%s, user_id=%s", session_id, user_id)
     self.update_state(
         state="PROGRESS",
         meta={"stage": "FETCHING_HISTORY", "message": "Reading session chat history...", "pct": 0.2},
-    )
-
-    # 1. Connect to Redis and MongoDB synchronously inside Celery worker
-    r_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-    m_client = pymongo.MongoClient(MONGODB_URL)
-    db = m_client[MONGODB_DB_NAME]
+    )    
 
     key = f"session:{session_id}:working_memory"
-    raw_history = r_client.get(key)
+    raw_history = redis_client.get(key)
     history = json.loads(raw_history) if raw_history else []
 
     if not history:
@@ -124,37 +108,18 @@ def extract_session_memory(self, session_id: str, user_id: str | None = None) ->
         meta={"stage": "EXTRACTING_MEMORY", "message": "Running LLM memory extraction...", "pct": 0.5},
     )
 
-    # 2. Setup LLM client using SUMMARIZER model
-    llm_client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+    llmongo_client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
-    extraction_prompt = f"""\
-You are an expert cognitive memory extraction system.
-Analyze the following session conversation transcript and extract two types of memory:
-
-1. EPISODIC MEMORY: Key events, user goals, major interactions, and a concise summary timeline of what transpired in this session.
-2. SEMANTIC MEMORY: Concrete facts, domain knowledge, user preferences, terms, or key insights established during the conversation.
-
-Format your response as valid JSON with exact keys:
-{{
-  "episodic_summary": "...",
-  "key_events": ["..."],
-  "semantic_facts": ["..."],
-  "user_preferences": ["..."]
-}}
-
-Transcript:
-{formatted_transcript}
-"""
+    extraction_prompt = EXTRACTION_PROMPT.format(formatted_transcript=formatted_transcript)
 
     try:
-        response = llm_client.chat.completions.create(
+        response = llmongo_client.chat.completions.create(
             model=SUMMARIZER,
             messages=[{"role": "user", "content": extraction_prompt}],
             temperature=0.1,
         )
         content = response.choices[0].message.content or ""
 
-        # Parse JSON
         parsed = {}
         try:
             start = content.find("{")
@@ -174,7 +139,6 @@ Transcript:
             meta={"stage": "PERSISTING", "message": "Saving memories to MongoDB...", "pct": 0.8},
         )
 
-        # 3. Store into MongoDB
         doc_episodic = {
             "session_id": session_id,
             "user_id": user_id,

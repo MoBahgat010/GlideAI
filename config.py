@@ -9,6 +9,7 @@ MAX_CHARS = int(os.getenv("MAX_CHARS", "1000"))
 OVERLAP_CHARS = int(os.getenv("OVERLAP_CHARS", "200"))
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "google/siglip-large-patch16-384")
+EMBEDDING_MODEL_D_MODEL = int(os.getenv("EMBEDDING_MODEL_D_MODEL", "768"))
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "jinaai/jina-reranker-m0")
 
 INDEX_NAME = os.getenv("INDEX_NAME", "personal-trials")

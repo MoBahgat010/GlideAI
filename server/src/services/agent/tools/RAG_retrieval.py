@@ -1,6 +1,6 @@
 import logging
 from langchain_core.tools import tool
-from RAG_Pipeline.retrieval.execute import get_retrieval_pipeline
+from RAG_Pipeline.retrieval.execute import retrieval_pipeline
 from server.src.services.agent.tools.base_tools import Tools
 
 logger = logging.getLogger("agent.tools.rag_retrieval")
@@ -18,7 +18,7 @@ async def rag_retrieval(query: str) -> str:
     """
     try:
         logger.info("Executing RAG retrieval for query: %r", query)
-        retrieval_result = await get_retrieval_pipeline().retrieve(query)
+        retrieval_result = await retrieval_pipeline.retrieve(query)
         results = retrieval_result.get("results", [])
 
         if not results:
@@ -27,15 +27,15 @@ async def rag_retrieval(query: str) -> str:
         output_snippets = []
         for idx, item in enumerate(results, 1):
             chunk_id = item.get("custom_id", f"doc_{idx}")
-            file_name = item.get("file_name", "N/A")
-            page = item.get("page", "N/A")
-            bbox = item.get("bbox", "N/A")
+            file_name = item.get("file_name", "null")
+            page = item.get("page", "null")
+            bbox = item.get("bbox", "null")
             doc_type = item.get("type", "text")
             score = item.get("rerank_score", 0.0)
             text = item.get("chunk_text") or item.get("caption") or ""
 
             snippet = (
-                f"--- Result [{idx}] ---\n"
+                f"--- Result {idx} ---\n"
                 f"Chunk ID: {chunk_id}\n"
                 f"File Name: {file_name}\n"
                 f"Page: {page}\n"

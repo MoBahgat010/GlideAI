@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 from langchain_core.documents import Document
 
+
 class VectorDatabaseStrategy(ABC):
     @abstractmethod
     def as_vectorstore(self, embedding: Any = None, text_key: str = "chunk_text"):

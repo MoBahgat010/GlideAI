@@ -8,7 +8,6 @@ from config import REDIS_URL
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
-from deepagents.backends import LocalShellBackend
 from server.src.services.agent.models.orchestrator import orchestrator
 from server.src.services.agent.system_prompt import SYSTEM_PROMPT
 from server.src.services.agent.middlewares.base_middleware import BaseMiddleware

@@ -77,6 +77,7 @@ class TritonPythonModel:
                 out_tensor = pb_utils.Tensor("SCORES", np.array(req_scores, dtype=np.float32))
                 results[req_idx] = pb_utils.InferenceResponse(output_tensors=[out_tensor])
 
+        torch.cuda.empty_cache()
         return results
 
     def finalize(self) -> None:

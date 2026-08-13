@@ -1,20 +1,3 @@
-"""
-MultimodalEncoder: Bi-encoder client for text and image embeddings via Triton Server gRPC.
-
-Target Triton Models:
-  - Ingestion embeddings  → bi_encoder_ingestion
-  - Query embeddings      → bi_encoder_retrieval
-
-NOTE on dtype:
-  tritonclient maps numpy dtype=object → Triton "BYTES".
-  All config.pbtxt inputs declare TYPE_BYTES, and InferInput is constructed
-  with datatype="BYTES".  Items must be plain Python str objects.
-
-NOTE on batching:
-  When a document batch contains both text and image chunks, each input type
-  is sent in a separate infer call (text-only, image-only) because Triton
-  requires all inputs within a single request to share the same batch size.
-"""
 import logging
 from typing import List
 
@@ -35,13 +18,8 @@ class MultimodalEncoder:
 
     @staticmethod
     def _str_tensor(name: str, items: List[str]) -> grpcclient.InferInput:
-        """Build a BYTES InferInput from a list of plain strings.
-
-        With max_batch_size > 0, Triton prepends the batch dim automatically,
-        so dims: [-1] in config means the full tensor shape is [batch, -1].
-        We send shape (N, 1) — N items, each a 1-element BYTES array.
-        """
-        arr = np.array(items, dtype=object).reshape(-1, 1)
+        """Build a BYTES InferInput from a list of plain strings."""
+        arr = np.array(items, dtype=object)
         inp = grpcclient.InferInput(name, arr.shape, "BYTES")
         inp.set_data_from_numpy(arr)
         return inp
@@ -64,11 +42,6 @@ class MultimodalEncoder:
         return results
 
     def embed_chunks(self, chunks: List[Document]) -> List[List[float]]:
-        """
-        Embed document chunks for vector indexing.
-        Text and image chunks are sent in separate Triton requests to satisfy
-        Triton's requirement that all inputs share the same batch size.
-        """
         if not chunks:
             return []
 

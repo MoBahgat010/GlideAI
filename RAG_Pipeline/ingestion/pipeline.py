@@ -11,17 +11,12 @@ from RAG_Pipeline.storage import VDB, WeaviateVDB
 logger = logging.getLogger("ingestion.pipeline")
 
 class IngestionPipeline:
-    def __init__(self, batch_size: int = EMBED_BATCH):
-        self.loader = PDFLoader()
-        self.chunker = SemanticChunker(MAX_CHARS, OVERLAP_CHARS)
-        self.encoder = MultimodalEncoder(url=TRITON_GRPC_URL)
+    def __init__(self, loader: PDFLoader, chunker: SemanticChunker, encoder: MultimodalEncoder, vdb: VDB, batch_size: int = EMBED_BATCH):
+        self.loader = loader
+        self.chunker = chunker
+        self.encoder = encoder
+        self.vdb = vdb
 
-        self.vdb = VDB(strategy=WeaviateVDB(
-                endpoint=config.WEAVIATE_REST_ENDPOINT,
-                api_key=config.WEAVIATE_API_KEY,
-                index=INDEX_NAME,
-                dimension=self.encoder.d_model,
-        ))
         # self.transcriber = RevAITranscriber()
 
         self.batch_size = batch_size

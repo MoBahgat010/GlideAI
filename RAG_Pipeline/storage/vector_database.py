@@ -21,5 +21,5 @@ class VDB:
     def hybrid_query(self, query_text: str, vector: list[float], top_k: int, alpha: float) -> list[dict[str, Any]]:
         return self.strategy.hybrid_query(query_text=query_text, vector=vector, top_k=top_k, alpha=alpha)
 
-    async def fetch_batch(self, ids: list[str]) -> list[dict[str, Any]]:
-        return await self.strategy.fetch_batch(ids=ids)
+    def fetch_batch(self, ids: list[str]) -> list[dict[str, Any]]:
+        return self.strategy.fetch_batch(ids=ids)

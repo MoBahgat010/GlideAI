@@ -9,7 +9,7 @@ from weaviate.classes.init import Auth
 from weaviate.classes.config import Configure, DataType, Property
 from weaviate.classes.query import Filter, MetadataQuery
 from weaviate.util import generate_uuid5
-from .vector_sotrage_strategy import VectorDatabaseStrategy
+from .vector_storage_strategy import VectorDatabaseStrategy
 
 logger = logging.getLogger("storage.weaviate")
 
@@ -116,7 +116,6 @@ class WeaviateVDB(VectorDatabaseStrategy):
 
                 properties = {k: v for k, v in properties.items() if v is not None}
 
-                # Deterministic Weaviate UUID from chunk_id for true idempotent upserts
                 obj_uuid = generate_uuid5(chunk_id)
 
                 batch.add_object(

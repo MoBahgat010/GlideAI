@@ -1,5 +1,5 @@
 from .vector_database import VDB
-from .vector_sotrage_strategy import VectorDatabaseStrategy
+from .vector_storage_strategy import VectorDatabaseStrategy
 from .weaviate import WeaviateVDB
 from .pinecone import PineconeVDB
 
