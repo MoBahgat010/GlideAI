@@ -1,25 +1,16 @@
 """
-cross_encoder/1/model.py — GPU reranker model.
+cross_encoder/1/model.py — Dynamic Request Unloading & Offset-Batched GPU Reranker.
 
-Receives:
-  QUERY      — shape [1],    single query string.
-  CANDIDATES — shape [-1],   array of candidate strings (text or image captions).
-
-Returns:
-  SCORES — shape [-1], float32 relevance scores, one per candidate.
-
-Multiple simultaneous requests are dispatched on separate CUDA streams
-via contextlib.ExitStack so they overlap on the GPU rather than serialising.
+Unloads candidate lists and queries from all incoming Triton batch requests first.
+Constructs a single flat list of (query, candidate) pairs across requests,
+executes a single batched GPU forward pass, and maps scores back using an offset list.
 """
-import contextlib
-
 import numpy as np
 import torch
 import triton_python_backend_utils as pb_utils
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
-# from config import RERANKER_MODEL
-RERANKER_MODEL="jinaai/jina-reranker-m0"
-_MAX_STREAMS = 4
+
+RERANKER_MODEL = "jinaai/jina-reranker-m0"
 
 
 class TritonPythonModel:
@@ -42,90 +33,72 @@ class TritonPythonModel:
         self._tokenizer = AutoTokenizer.from_pretrained(RERANKER_MODEL, trust_remote_code=True)
 
         device = next(self._model.parameters()).device
-        self._on_cuda = device.type == "cuda"
+        self._logger.log_info(f"[{RERANKER_MODEL}] Ready on device {device}.")
 
-        if self._on_cuda:
-            self._streams = [torch.cuda.Stream() for _ in range(_MAX_STREAMS)]
-        else:
-            self._streams = [None] * _MAX_STREAMS
-
-        self._logger.log_info(f"[{RERANKER_MODEL}] ready on {device}.")
-
-    def execute(self, requests: list) -> "list[pb_utils.InferenceResponse]":
+    def execute(self, requests: list) -> list:
         """
-        Launch all scoring jobs on separate CUDA streams, then synchronise
-        and return — concurrent requests overlap on the GPU.
+        1. Unload all requests first into a single combined pairs list.
+        2. Keep an offset list mapping request indices to pair slice boundaries.
+        3. Execute ONE batched forward pass on GPU for all candidate pairs.
+        4. Slice the scores using the offset list and return per-request responses.
         """
-        n = len(requests)
-        results: list = [None] * n
-        pending: list[tuple] = []  # (stream, scores_array, request_index)
+        n_requests = len(requests)
+        results = [None] * n_requests
 
-        with contextlib.ExitStack() as stack:
-            for i, request in enumerate(requests):
-                stream = self._streams[i % len(self._streams)]
+        all_pairs = []
+        request_offsets = []  # List of (req_idx, start_idx, end_idx)
 
-                ctx = (
-                    torch.cuda.stream(stream)
-                    if stream is not None
-                    else contextlib.nullcontext()
-                )
-                stack.enter_context(ctx)
+        # Step 1: Unload all requests into combined flat pairs list
+        for i, request in enumerate(requests):
+            try:
+                query_arr = pb_utils.get_input_tensor_by_name(request, "QUERY").as_numpy()
+                candidates_arr = pb_utils.get_input_tensor_by_name(request, "CANDIDATES").as_numpy()
 
-                try:
-                    query_arr = pb_utils.get_input_tensor_by_name(request, "QUERY").as_numpy()
-                    candidates_arr = pb_utils.get_input_tensor_by_name(request, "CANDIDATES").as_numpy()
+                query = query_arr.flat[0].decode("utf-8") if isinstance(query_arr.flat[0], bytes) else str(query_arr.flat[0])
+                candidates = [p.decode("utf-8") if isinstance(p, bytes) else str(p) for p in candidates_arr.flat]
 
-                    query = query_arr.flat[0].decode("utf-8")
-                    candidates = [p.decode("utf-8") for p in candidates_arr.flat]
+                start_idx = len(all_pairs)
+                for cand in candidates:
+                    all_pairs.append([query, cand])
+                end_idx = len(all_pairs)
 
-                    scores = self._score(query, candidates, stream=stream)
-                    pending.append((stream, scores, i))
+                request_offsets.append((i, start_idx, end_idx))
+            except Exception as exc:
+                self._logger.log_error(f"[cross_encoder] Unload error request {i}: {exc}")
+                results[i] = pb_utils.InferenceResponse(error=pb_utils.TritonError(str(exc)))
 
-                except Exception as exc:  # noqa: BLE001
-                    self._logger.log_error(f"[cross_encoder] launch error request {i}: {exc}")
-                    results[i] = pb_utils.InferenceResponse(
-                        error=pb_utils.TritonError(str(exc))
-                    )
+        # Step 2: Parallel forward pass for all pairs across requests
+        if all_pairs:
+            all_scores = self._score_pairs(all_pairs)
 
-        # Synchronise each stream once, then build responses.
-        seen_streams: set[int] = set()
-        for stream, scores, idx in pending:
-            if stream is not None and id(stream) not in seen_streams:
-                stream.synchronize()
-                seen_streams.add(id(stream))
-
-            out = pb_utils.Tensor("SCORES", np.array(scores, dtype=np.float32))
-            results[idx] = pb_utils.InferenceResponse(output_tensors=[out])
+            # Step 3: Map scores back using request boundary offsets
+            for req_idx, start_idx, end_idx in request_offsets:
+                req_scores = all_scores[start_idx:end_idx]
+                out_tensor = pb_utils.Tensor("SCORES", np.array(req_scores, dtype=np.float32))
+                results[req_idx] = pb_utils.InferenceResponse(output_tensors=[out_tensor])
 
         return results
 
     def finalize(self) -> None:
         del self._model
-        torch.cuda.empty_cache()
+        del self._tokenizer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     @torch.no_grad()
-    def _score(
-        self,
-        query: str,
-        candidates: list[str],
-        stream: "torch.cuda.Stream | None" = None,
-    ) -> list[float]:
-        pairs = [[query, c] for c in candidates]
-
-        ctx = torch.cuda.stream(stream) if stream is not None else contextlib.nullcontext()
-        with ctx:
-            if hasattr(self._model, "compute_score"):
-                raw = self._model.compute_score(pairs)
-            else:
-                inputs = self._tokenizer(
-                    pairs,
-                    padding=True,
-                    truncation=True,
-                    return_tensors="pt",
-                )
-                inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
-                outputs = self._model(**inputs)
-                raw = outputs.logits.squeeze(-1).cpu().float().numpy().tolist()
+    def _score_pairs(self, pairs: list[list[str]]) -> list[float]:
+        if hasattr(self._model, "compute_score"):
+            raw = self._model.compute_score(pairs)
+        else:
+            inputs = self._tokenizer(
+                pairs,
+                padding=True,
+                truncation=True,
+                return_tensors="pt",
+            )
+            inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
+            outputs = self._model(**inputs)
+            raw = outputs.logits.squeeze(-1).cpu().float().numpy().tolist()
 
         if isinstance(raw, (float, int)):
             raw = [float(raw)]

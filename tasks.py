@@ -13,14 +13,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("tasks")
 
-from config import EMBED_BATCH, REDIS_URL
+from config import (
+    EMBED_BATCH,
+    REDIS_URL,
+    MONGODB_URL,
+    MONGODB_DB_NAME,
+    SUMMARIZER,
+    BASE_URL,
+    API_KEY,
+    TRITON_HTTP_URL,
+)
 from RAG_Pipeline.ingestion.pipeline import IngestionPipeline
 import json
 import redis
 import pymongo
 from openai import OpenAI
 from urllib import request
-from config import MONGODB_URL, MONGODB_DB_NAME, QWEN_SERVER_URL, QWEN_MODEL, TRITON_HTTP_URL
 
 def check_triton_health(url: str) -> bool:
     """Check if Triton Inference Server is running and ready via HTTP GET."""
@@ -33,7 +41,7 @@ def check_triton_health(url: str) -> bool:
         return False
 
 if not check_triton_health(TRITON_HTTP_URL):
-    raise ConnectionError("Triton server is not running at %s", TRITON_HTTP_URL)
+    raise ConnectionError(f"Triton server is not running at {TRITON_HTTP_URL}")
 
 celery_app = Celery(
     "tasks",
@@ -57,7 +65,7 @@ def run_ingestion(self, job_id: str, storage_keys: str) -> dict:
         state="PROGRESS",
         meta={"stage": "PARSING", "message": "Loading document(s)...", "pct": 0.1},
     )
-    
+
     try:
         self.update_state(
             state="PROGRESS",
@@ -85,9 +93,9 @@ def extract_session_memory(self, session_id: str, user_id: str | None = None) ->
     """
     Celery task run after user closes a session.
     Extracts episodic memory (events, narrative) and semantic memory (facts, concepts)
-    from working memory history and persists them into MongoDB.
+    from working memory history and persists them into MongoDB using SUMMARIZER model.
     """
-    
+
     logger.info("Starting memory extraction for session_id=%s, user_id=%s", session_id, user_id)
     self.update_state(
         state="PROGRESS",
@@ -116,11 +124,8 @@ def extract_session_memory(self, session_id: str, user_id: str | None = None) ->
         meta={"stage": "EXTRACTING_MEMORY", "message": "Running LLM memory extraction...", "pct": 0.5},
     )
 
-    # 2. Setup LLM client for extraction
-    qwen_base = QWEN_SERVER_URL.rstrip("/")
-    if not qwen_base.endswith("/v1"):
-        qwen_base += "/v1"
-    llm_client = OpenAI(api_key="EMPTY", base_url=qwen_base)
+    # 2. Setup LLM client using SUMMARIZER model
+    llm_client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
     extraction_prompt = f"""\
 You are an expert cognitive memory extraction system.
@@ -143,7 +148,7 @@ Transcript:
 
     try:
         response = llm_client.chat.completions.create(
-            model=QWEN_MODEL,
+            model=SUMMARIZER,
             messages=[{"role": "user", "content": extraction_prompt}],
             temperature=0.1,
         )
@@ -205,5 +210,3 @@ Transcript:
     except Exception as exc:
         logger.exception("Memory extraction failed for session_id=%s: %s", session_id, exc)
         raise exc
-
-

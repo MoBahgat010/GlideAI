@@ -1,10 +1,10 @@
-name: "bi_encoder"
+name: "bi_encoder_ingestion"
 backend: "python"
 
-max_batch_size: 32
+max_batch_size: 128
 
 dynamic_batching {
-  preferred_batch_size: [ 8, 16, 32 ]
+  preferred_batch_size: [ 2, 4, 8 ]
   max_queue_delay_microseconds: 10000
 }
 
@@ -12,13 +12,13 @@ input [
   {
     name: "TEXT"
     data_type: TYPE_STRING
-    dims: [ 1 ]
+    dims: [ -1 ]
     optional: true
   },
   {
     name: "IMAGE_BASE64"
     data_type: TYPE_STRING
-    dims: [ 1 ]
+    dims: [ -1 ]
     optional: true
   }
 ]
@@ -27,7 +27,7 @@ output [
   {
     name: "EMBEDDING"
     data_type: TYPE_FP32
-    dims: [ -1 ]
+    dims: [ -1, 768 ]
   }
 ]
 

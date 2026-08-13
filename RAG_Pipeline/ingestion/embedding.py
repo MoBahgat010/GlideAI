@@ -1,145 +1,112 @@
 """
-MultimodalEncoder: Bi-encoder for text and image embeddings.
+MultimodalEncoder: Bi-encoder client for text and image embeddings via Triton Server gRPC.
 
-Backed by Triton Server via gRPC (port 8001).
-Text requests  → bi_encoder_text  (independent dynamic batching)
-Image requests → bi_encoder_image (independent dynamic batching)
+Target Triton Models:
+  - Ingestion embeddings  → bi_encoder_ingestion
+  - Query embeddings      → bi_encoder_retrieval
 
-Both routers forward internally to the bi_encoder GPU worker, so text
-and image inference never block each other.
+NOTE on dtype:
+  tritonclient maps numpy dtype=object → Triton "BYTES".
+  All config.pbtxt inputs declare TYPE_BYTES, and InferInput is constructed
+  with datatype="BYTES".  Items must be plain Python str objects.
+
+NOTE on batching:
+  When a document batch contains both text and image chunks, each input type
+  is sent in a separate infer call (text-only, image-only) because Triton
+  requires all inputs within a single request to share the same batch size.
 """
-import base64
-import binascii
-import io
 import logging
-from typing import Any
+from typing import List
 
 import numpy as np
-from PIL import Image, UnidentifiedImageError
 from langchain_core.documents import Document
 import tritonclient.grpc as grpcclient
-from tritonclient.utils import InferenceServerException
 
 from config import TRITON_GRPC_URL
 
 logger = logging.getLogger("ingestion.embedding")
 
-
 class MultimodalEncoder:
-    # Resolved at first encode call so the dim is dynamic (768 for SigLIP).
-    d_model: int | None = None
-
-    def __init__(self, url: str = TRITON_GRPC_URL):
+    def __init__(self, url: str = TRITON_GRPC_URL, d_model: int = 768):
         self._url = url
-        self._client: grpcclient.InferenceServerClient | None = None
-        logger.info("MultimodalEncoder will connect to Triton gRPC at %s", url)
+        self.d_model = d_model
+        self._client = grpcclient.InferenceServerClient(url=self._url)
+        logger.info("MultimodalEncoder initialized for Triton gRPC at %s", url)
 
-    # ─── gRPC client (lazy) ───────────────────────────────────────────────────
+    @staticmethod
+    def _str_tensor(name: str, items: List[str]) -> grpcclient.InferInput:
+        """Build a BYTES InferInput from a list of plain strings.
 
-    def _get_client(self) -> grpcclient.InferenceServerClient:
-        if self._client is None:
-            self._client = grpcclient.InferenceServerClient(url=self._url)
-            logger.info("MultimodalEncoder connected to Triton gRPC at %s", self._url)
-        return self._client
-
-    def encode_text(self, texts: list[str]) -> list[list[float]]:
-        """Encode a batch of strings via Triton → L2-normalised float32 vectors."""
-        safe_texts = [t if (t and t.strip()) else " " for t in texts]
-        text_data = np.array([[t.encode("utf-8")] for t in safe_texts], dtype=object)
-
-        infer_in = grpcclient.InferInput("TEXT", text_data.shape, "TYPE_STRING")
-        infer_in.set_data_from_numpy(text_data)
-
-        infer_out = grpcclient.InferRequestedOutput("EMBEDDING")
-
-        response = self._get_client().infer(
-            model_name="bi_encoder",
-            inputs=[infer_in],
-            outputs=[infer_out],
-        )
-        result = response.as_numpy("EMBEDDING")
-        self._update_dim(result)
-        return result.tolist()
-
-    def encode_image(self, images: list[Image.Image]) -> list[list[float]]:
-        """Encode a batch of PIL Images via Triton → L2-normalised float32 vectors."""
-        b64_strings = [self._pil_to_base64(img) for img in images]
-        image_data = np.array([[b.encode("utf-8")] for b in b64_strings], dtype=object)
-
-        infer_in = grpcclient.InferInput("IMAGE_BASE64", image_data.shape, "TYPE_STRING")
-        infer_in.set_data_from_numpy(image_data)
-
-        infer_out = grpcclient.InferRequestedOutput("EMBEDDING")
-
-        response = self._get_client().infer(
-            model_name="bi_encoder",
-            inputs=[infer_in],
-            outputs=[infer_out],
-        )
-        result = response.as_numpy("EMBEDDING")
-        self._update_dim(result)
-        return result.tolist()
-
-    def embed_chunks(self, chunks: list[Document]) -> list[dict[str, Any]]:
+        With max_batch_size > 0, Triton prepends the batch dim automatically,
+        so dims: [-1] in config means the full tensor shape is [batch, -1].
+        We send shape (N, 1) — N items, each a 1-element BYTES array.
         """
-        Embed a mixed batch of text and image chunks via Triton.
-        Text and image sub-batches are dispatched to their own Triton router
-        models so they run concurrently — images don't wait behind text.
+        arr = np.array(items, dtype=object).reshape(-1, 1)
+        inp = grpcclient.InferInput(name, arr.shape, "BYTES")
+        inp.set_data_from_numpy(arr)
+        return inp
+
+    def _infer(self, inputs: list) -> np.ndarray:
+        response = self._client.infer(
+            model_name="bi_encoder_ingestion",
+            inputs=inputs,
+            outputs=[grpcclient.InferRequestedOutput("EMBEDDING")],
+        )
+        return response.as_numpy("EMBEDDING")
+
+    def _infer_batched(self, tensor_name: str, items: List[str]) -> List[List[float]]:
+        results = []
+        arr = self._infer([self._str_tensor(tensor_name, items)])
+        if arr is None:
+            results.extend([[0.0] * self.d_model] * len(items))
+        else:
+            results.extend(arr.tolist())
+        return results
+
+    def embed_chunks(self, chunks: List[Document]) -> List[List[float]]:
         """
-        results: list[dict[str, Any] | None] = [None] * len(chunks)
+        Embed document chunks for vector indexing.
+        Text and image chunks are sent in separate Triton requests to satisfy
+        Triton's requirement that all inputs share the same batch size.
+        """
+        if not chunks:
+            return []
 
-        text_indices: list[int] = []
-        text_batch: list[str] = []
+        text_batch = []
+        image_batch = []
+        text_indices = []
+        image_indices = []
 
-        image_indices: list[int] = []
-        image_batch: list[Image.Image] = []
-
-        for i, chunk in enumerate(chunks):
+        for idx, chunk in enumerate(chunks):
             if chunk.metadata.get("type") == "image":
-                img_data = chunk.metadata.get("image_path") or chunk.metadata.get("image_base64")
-                pil_image = self._decode_base64_image(img_data)
-                if pil_image is None:
-                    logger.warning("Skipping undecodable image chunk at index %d; using text fallback", i)
-                    text_indices.append(i)
-                    text_batch.append(chunk.page_content)
-                else:
-                    image_indices.append(i)
-                    image_batch.append(pil_image)
+                image_batch.append(str(chunk.page_content))
+                image_indices.append(idx)
             else:
-                text_indices.append(i)
-                text_batch.append(chunk.page_content)
+                text_batch.append(str(chunk.page_content))
+                text_indices.append(idx)
+
+        final_embeddings: List = [None] * len(chunks)
 
         if text_batch:
-            for idx, embedding in zip(text_indices, self.encode_text(text_batch)):
-                results[idx] = {"document": chunks[idx], "embedding": embedding, "modality": "text"}
+            text_vecs = self._infer_batched("TEXT", text_batch)
+            for i, chunk_idx in enumerate(text_indices):
+                final_embeddings[chunk_idx] = text_vecs[i]
 
         if image_batch:
-            for idx, embedding in zip(image_indices, self.encode_image(image_batch)):
-                results[idx] = {"document": chunks[idx], "embedding": embedding, "modality": "image"}
+            image_vecs = self._infer_batched("IMAGE_BASE64", image_batch)
+            for i, chunk_idx in enumerate(image_indices):
+                final_embeddings[chunk_idx] = image_vecs[i]
 
-        return [r for r in results if r is not None]
+        return final_embeddings
 
-    # ─── Helpers ──────────────────────────────────────────────────────────────
-
-    def _update_dim(self, arr: np.ndarray) -> None:
-        if MultimodalEncoder.d_model is None and arr.ndim >= 2:
-            MultimodalEncoder.d_model = arr.shape[-1]
-
-    @staticmethod
-    def _pil_to_base64(img: Image.Image) -> str:
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-    @staticmethod
-    def _decode_base64_image(data: str | None) -> Image.Image | None:
-        if not data:
-            return None
-        if data.startswith("data:") and ";base64," in data:
-            data = data.split(";base64,", 1)[1]
-        try:
-            raw = base64.b64decode(data, validate=True)
-            return Image.open(io.BytesIO(raw)).convert("RGB")
-        except (binascii.Error, ValueError, UnidentifiedImageError, OSError) as exc:
-            logger.warning("Failed to decode base64 image: %s", exc)
-            return None
+    def encode_query(self, query: str) -> List[float]:
+        """Encode a single search query string using bi_encoder_retrieval."""
+        response = self._client.infer(
+            model_name="bi_encoder_retrieval",
+            inputs=[self._str_tensor("TEXT", [str(query)])],
+            outputs=[grpcclient.InferRequestedOutput("EMBEDDING")],
+        )
+        result = response.as_numpy("EMBEDDING")
+        if result is not None and len(result) > 0:
+            return result[0].tolist()
+        return [0.0] * self.d_model

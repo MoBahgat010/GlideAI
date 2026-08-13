@@ -6,9 +6,6 @@ class VDB:
     def __init__(self, strategy: VectorDatabaseStrategy):
         self.strategy = strategy
 
-    def set_strategy(self, strategy: VectorDatabaseStrategy):
-        self.strategy = strategy
-
     def as_vectorstore(self, embedding: Any = None, text_key: str = "chunk_text"):
         return self.strategy.as_vectorstore(embedding=embedding, text_key=text_key)
 

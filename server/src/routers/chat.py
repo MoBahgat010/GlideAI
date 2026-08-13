@@ -1,30 +1,24 @@
 import json
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from server.src.auth.dependencies import get_current_user, get_optional_user
 from server.src.models.schemas import AskRequest, AskSessionRequest
-from server.src.services.agent_service import get_agentic_rag
+from server.src.services.agent.workflow import AgenticRAG
 
 logger = logging.getLogger("server.routers.chat")
 
 router = APIRouter(prefix="/api", tags=["Agentic RAG Chat"])
 
+_agent_instance: AgenticRAG | None = None
 
-def _serialise_results(results: list[dict]) -> list[dict]:
-    """Strip non-serialisable values from result dicts."""
-    out = []
-    for r in results:
-        entry = {k: v for k, v in r.items() if isinstance(v, (str, int, float, bool, type(None)))}
-        for nested_key in ("linked_image", "linked_caption"):
-            if isinstance(r.get(nested_key), dict):
-                entry[nested_key] = {
-                    k: v for k, v in r[nested_key].items()
-                    if isinstance(v, (str, int, float, bool, type(None)))
-                }
-        out.append(entry)
-    return out
+def get_agent_runner() -> AgenticRAG:
+    global _agent_instance
+    if _agent_instance is None:
+        logger.info("Initializing global AgenticRAG workflow instance")
+        _agent_instance = AgenticRAG()
+    return _agent_instance
 
 
 @router.post("/sessions/{session_id}/ask")
@@ -35,40 +29,27 @@ async def ask_session(
 ):
     """
     Run Agentic RAG for a specific user session.
-    Loads and updates Redis working memory automatically.
+    Loads and updates Redis working memory automatically across stateless nodes.
     Streams tokens as SSE events.
     """
     query = req.query.strip()
     if not query:
         raise HTTPException(400, "Query must not be empty.")
 
-    pipeline, generator = get_agentic_rag()
+    agent = get_agent_runner()
 
     async def event_stream():
-        logger.info("Starting Agentic RAG retrieval for session=%s query=%r", session_id, query[:80])
+        logger.info("Starting Agentic RAG execution for session=%s query=%r", session_id, query[:80])
         try:
-            retrieval_result = await pipeline.retrieve(query)
-        except Exception as exc:
-            logger.exception("Retrieval failed: %s", exc)
-            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
-            return
-
-        results = retrieval_result.get("results", [])
-        logger.info("Retrieval returned %d results; starting Agentic answer stream", len(results))
-
-        # Stream Agentic RAG LLM tokens with Redis working memory
-        try:
-            async for token in generator.stream(query, results, session_id=session_id):
+            async for token in agent.arun(user_message=query, session_id=session_id):
                 payload = json.dumps({"type": "token", "content": token})
                 yield f"data: {payload}\n\n"
         except Exception as exc:
-            logger.exception("Agentic RAG streaming failed: %s", exc)
+            logger.exception("Agentic RAG streaming failed for session=%s: %s", session_id, exc)
             yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
             return
 
-        # Final SSE event
-        safe_results = _serialise_results(results)
-        yield f"data: {json.dumps({'type': 'done', 'results': safe_results})}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -80,36 +61,25 @@ async def ask_general(
 ):
     """
     Standard ask endpoint (backward compatible).
-    Streams tokens as Server-Sent Events.
+    Streams tokens as Server-Sent Events with Redis working memory support.
     """
     query = req.query.strip()
     if not query:
         raise HTTPException(400, "Query must not be empty.")
 
-    pipeline, generator = get_agentic_rag()
+    agent = get_agent_runner()
 
     async def event_stream():
-        logger.info("Starting general RAG retrieval for query=%r", query[:80])
+        logger.info("Starting general Agentic RAG execution for query=%r", query[:80])
         try:
-            retrieval_result = await pipeline.retrieve(query)
-        except Exception as exc:
-            logger.exception("Retrieval failed: %s", exc)
-            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
-            return
-
-        results = retrieval_result.get("results", [])
-        logger.info("Retrieval returned %d results; starting answer stream", len(results))
-
-        try:
-            async for token in generator.stream(query, results, session_id=None):
+            async for token in agent.arun(user_message=query, session_id=None):
                 payload = json.dumps({"type": "token", "content": token})
                 yield f"data: {payload}\n\n"
         except Exception as exc:
-            logger.exception("Answer streaming failed: %s", exc)
+            logger.exception("Agentic RAG streaming failed: %s", exc)
             yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
             return
 
-        safe_results = _serialise_results(results)
-        yield f"data: {json.dumps({'type': 'done', 'results': safe_results})}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

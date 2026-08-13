@@ -153,18 +153,7 @@ class SemanticChunker:
         file_name: str,
         user_id: str,
     ):
-        caption = (
-            node.get("caption")
-            or self._get_text(node)
-            or "[image]"
-        ).strip()
-
-        prefix = "\n".join(filter(None, headings))
-
-        text = f"{prefix}\n\n{caption}" if prefix else caption
-
-        # OpenDataLoader stores base64 image under "data"; "source" may also exist
-        image_path = node.get("data") or node.get("source") or node.get("alt_source")
+        image_path = node.get("data")
         raw_id = node.get("id")
         chunk_id = self._make_chunk_id(user_id, file_name, raw_id)
 
@@ -173,7 +162,6 @@ class SemanticChunker:
             "type": "image",
             "page": node.get("page number"),
             "bbox": node.get("bounding box"),
-            "image_base64": image_path,
             "file_name": file_name,
         }
 
@@ -182,7 +170,7 @@ class SemanticChunker:
             metadata["linked_content_id"] = self._make_chunk_id(user_id, file_name, raw_linked)
 
         return Document(
-            page_content=text,
+            page_content=image_path,
             metadata=metadata,
         )
 

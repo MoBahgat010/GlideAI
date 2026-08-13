@@ -1,21 +1,16 @@
-name: "cross_encoder"
+name: "bi_encoder_retrieval"
 backend: "python"
 
-max_batch_size: 4
+max_batch_size: 8
 
 dynamic_batching {
-  preferred_batch_size: [ 2, 4 ]
+  preferred_batch_size: [ 2, 4, 8 ]
   max_queue_delay_microseconds: 10000
 }
 
 input [
   {
-    name: "QUERY"
-    data_type: TYPE_STRING
-    dims: [ -1 ]
-  },
-  {
-    name: "CANDIDATES"
+    name: "TEXT"
     data_type: TYPE_STRING
     dims: [ -1 ]
   }
@@ -23,9 +18,9 @@ input [
 
 output [
   {
-    name: "SCORES"
+    name: "EMBEDDING"
     data_type: TYPE_FP32
-    dims: [ -1 ]
+    dims: [ 768 ]
   }
 ]
 
@@ -38,7 +33,7 @@ instance_group [
       resources [
         {
           name: "GPU_MEMORY"
-          count: 1500
+          count: 2500
         }
       ]
       priority: 1

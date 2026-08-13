@@ -8,6 +8,7 @@ from langchain_weaviate import WeaviateVectorStore
 from weaviate.classes.init import Auth
 from weaviate.classes.config import Configure, DataType, Property
 from weaviate.classes.query import Filter, MetadataQuery
+from weaviate.util import generate_uuid5
 from .vector_sotrage_strategy import VectorDatabaseStrategy
 
 logger = logging.getLogger("storage.weaviate")
@@ -25,7 +26,7 @@ class WeaviateVDB(VectorDatabaseStrategy):
 
         self.client = weaviate.connect_to_weaviate_cloud(
             cluster_url=endpoint,
-            auth_credentials=Auth.api_key(api_key)
+            auth_credentials=Auth.api_key(api_key),
         )
 
         if not self.client.collections.exists(self.index):
@@ -92,7 +93,7 @@ class WeaviateVDB(VectorDatabaseStrategy):
         if len(chunks) != len(embeddings):
             raise ValueError("Number of chunks and embeddings must match.")
 
-        logger.info("Uploading %d chunks...", len(chunks))
+        logger.info("Upserting %d chunks into Weaviate collection '%s'...", len(chunks), self.index)
 
         with self.collection.batch.dynamic() as batch:
             for chunk, embedding in zip(chunks, embeddings):
@@ -100,9 +101,10 @@ class WeaviateVDB(VectorDatabaseStrategy):
                     embedding = embedding["embedding"]
 
                 metadata = dict(chunk.metadata)
+                chunk_id = metadata.get("custom_id")
 
                 properties = {
-                    "custom_id": metadata.get("custom_id"),
+                    "custom_id": chunk_id,
                     "chunk_text": chunk.page_content,
                     "type": metadata.get("type"),
                     "file_name": metadata.get("file_name"),
@@ -112,14 +114,18 @@ class WeaviateVDB(VectorDatabaseStrategy):
                     "linked_content_id": metadata.get("linked_content_id"),
                 }
 
-                properties = { k: v for k, v in properties.items() if v is not None }
+                properties = {k: v for k, v in properties.items() if v is not None}
+
+                # Deterministic Weaviate UUID from chunk_id for true idempotent upserts
+                obj_uuid = generate_uuid5(chunk_id)
 
                 batch.add_object(
                     properties=properties,
                     vector=embedding,
+                    uuid=obj_uuid,
                 )
 
-        logger.info("Finished uploading chunks.")
+        logger.info("Finished upserting batch of %d chunks to Weaviate (deterministic UUIDs enforced).", len(chunks))
 
     def hybrid_query(
         self,

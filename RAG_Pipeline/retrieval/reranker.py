@@ -24,18 +24,8 @@ logger = logging.getLogger("retrieval.reranker")
 class HybridReranker:
     def __init__(self, url: str = TRITON_GRPC_URL):
         self._url = url
-        self._client: grpcclient.InferenceServerClient | None = None
-        logger.info("HybridReranker will connect to Triton gRPC at %s", url)
-
-    # ─── gRPC client (lazy) ───────────────────────────────────────────────────
-
-    def _get_client(self) -> grpcclient.InferenceServerClient:
-        if self._client is None:
-            self._client = grpcclient.InferenceServerClient(url=self._url)
-            logger.info("HybridReranker connected to Triton gRPC at %s", self._url)
-        return self._client
-
-    # ─── Public API ───────────────────────────────────────────────────────────
+        self._client = grpcclient.InferenceServerClient(url=self._url)
+        logger.info("HybridReranker connected to Triton gRPC at %s", url)
 
     def rerank(
         self,
@@ -77,21 +67,19 @@ class HybridReranker:
         )
         return top_results
 
-    # ─── Triton call ──────────────────────────────────────────────────────────
-
     def _score(self, query: str, candidates: list[str]) -> list[float]:
-        query_data      = np.array([query.encode("utf-8")], dtype=object)
-        candidates_data = np.array([c.encode("utf-8") for c in candidates], dtype=object)
+        query_data = np.array([str(query)], dtype=object).reshape(-1, 1)
+        candidates_data = np.array([str(c) for c in candidates], dtype=object).reshape(-1, 1)
 
-        infer_query = grpcclient.InferInput("QUERY", query_data.shape, "TYPE_STRING")
+        infer_query = grpcclient.InferInput("QUERY", query_data.shape, "BYTES")
         infer_query.set_data_from_numpy(query_data)
 
-        infer_candidates = grpcclient.InferInput("CANDIDATES", candidates_data.shape, "TYPE_STRING")
+        infer_candidates = grpcclient.InferInput("CANDIDATES", candidates_data.shape, "BYTES")
         infer_candidates.set_data_from_numpy(candidates_data)
 
         infer_out = grpcclient.InferRequestedOutput("SCORES")
 
-        response = self._get_client().infer(
+        response = self._client.infer(
             model_name="cross_encoder",
             inputs=[infer_query, infer_candidates],
             outputs=[infer_out],

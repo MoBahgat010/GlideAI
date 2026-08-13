@@ -12,14 +12,13 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "google/siglip-large-patch16-384"
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "jinaai/jina-reranker-m0")
 
 INDEX_NAME = os.getenv("INDEX_NAME", "personal-trials")
-QWEN_SERVER_URL = os.getenv("QWEN_SERVER_URL", "http://127.0.0.1:8080")
-QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen")
-
 
 BASE_URL = os.getenv("BASE_URL", "https://integrate.api.nvidia.com/v1")
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
-LIGHT_WEIGHT = os.getenv("LIGHT_WEIGHT", "openai/gpt-oss-120b")
-HEAVY_WEIGHT = os.getenv("HEAVY_WEIGHT", "nvidia/nemotron-3-ultra-550b-a55b")
+API_KEY = os.getenv("API_KEY", "")
+SUMMARIZER = os.getenv("SUMMARIZER", "openai/gpt-oss-120b")
+TOKEN_THRESHOLD = int(os.getenv("TOKEN_THRESHOLD", "100000"))
+RUN_LIMIT = int(os.getenv("RUN_LIMIT", "30"))
+LVLM = os.getenv("LVLM", "nvidia/nemotron-3-ultra-550b-a55b")
 
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 
