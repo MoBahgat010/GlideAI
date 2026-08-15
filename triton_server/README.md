@@ -7,7 +7,7 @@ Inference Server hosting your two local GPU models:
 
 | Triton model | Source model | Purpose |
 |---|---|---|
-| `jina_encoder` | `jinaai/jina-clip-v2` | Text embedding for query vectors |
+| `bi_encoder_ingestion` / `bi_encoder_retrieval` | `google/siglip-large-patch16-384` | Multimodal / text embeddings (768-d) |
 | `jina_reranker` | `jinaai/jina-reranker-m0` (4-bit) | Cross-encoder reranking |
 
 **Why Triton instead of running models in-process?**
@@ -48,7 +48,7 @@ triton_server/
     ├── jina_encoder/
     │   ├── config.pbtxt                model config (dynamic batching on)
     │   └── 1/
-    │       └── model.py                Python backend (loads jina-clip-v2)
+    │       └── model.py                Python backend (loads SigLIP)
     └── jina_reranker/
         ├── config.pbtxt                model config (batching off)
         └── 1/

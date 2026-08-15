@@ -1,6 +1,6 @@
 from typing import Any
 from langchain_core.documents import Document
-from .vector_sotrage_strategy import VectorDatabaseStrategy
+from .vector_storage_strategy import VectorDatabaseStrategy
 
 class VDB:
     def __init__(self, strategy: VectorDatabaseStrategy):

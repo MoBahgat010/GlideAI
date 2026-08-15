@@ -135,6 +135,10 @@ class TritonPythonModel:
     def _encode_text(self, texts: list[str]) -> np.ndarray:
         inputs = self._processor(text=texts, return_tensors="pt", padding=True, truncation=True, max_length=64).to(self._device)
         text_embeds = self._model.get_text_features(**inputs)
+        if hasattr(text_embeds, "pooler_output") and text_embeds.pooler_output is not None:
+            text_embeds = text_embeds.pooler_output
+        elif hasattr(text_embeds, "last_hidden_state") and text_embeds.last_hidden_state is not None:
+            text_embeds = text_embeds.last_hidden_state[:, 0]
         text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
         return text_embeds.cpu().numpy()
 
@@ -142,5 +146,9 @@ class TritonPythonModel:
     def _encode_image(self, images: list[Image.Image]) -> np.ndarray:
         inputs = self._processor(images=images, return_tensors="pt").to(self._device)
         image_embeds = self._model.get_image_features(**inputs)
+        if hasattr(image_embeds, "pooler_output") and image_embeds.pooler_output is not None:
+            image_embeds = image_embeds.pooler_output
+        elif hasattr(image_embeds, "last_hidden_state") and image_embeds.last_hidden_state is not None:
+            image_embeds = image_embeds.last_hidden_state[:, 0]
         image_embeds = image_embeds / image_embeds.norm(p=2, dim=-1, keepdim=True)
         return image_embeds.cpu().numpy()

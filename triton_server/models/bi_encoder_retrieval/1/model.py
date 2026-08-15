@@ -75,5 +75,9 @@ class TritonPythonModel:
     def _encode_text(self, texts: list[str]) -> np.ndarray:
         inputs = self._processor(text=texts, return_tensors="pt", padding=True, truncation=True, max_length=64).to(self._device)
         text_embeds = self._model.get_text_features(**inputs)
+        if hasattr(text_embeds, "pooler_output") and text_embeds.pooler_output is not None:
+            text_embeds = text_embeds.pooler_output
+        elif hasattr(text_embeds, "last_hidden_state") and text_embeds.last_hidden_state is not None:
+            text_embeds = text_embeds.last_hidden_state[:, 0]
         text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
         return text_embeds.cpu().numpy()

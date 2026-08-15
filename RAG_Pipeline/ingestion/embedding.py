@@ -18,8 +18,8 @@ class MultimodalEncoder:
 
     @staticmethod
     def _str_tensor(name: str, items: List[str]) -> grpcclient.InferInput:
-        """Build a BYTES InferInput from a list of plain strings."""
-        arr = np.array(items, dtype=object)
+        """Build a BYTES InferInput from a list of plain strings with batch dimension."""
+        arr = np.array([str(x) for x in items], dtype=object).reshape(-1, 1)
         inp = grpcclient.InferInput(name, arr.shape, "BYTES")
         inp.set_data_from_numpy(arr)
         return inp

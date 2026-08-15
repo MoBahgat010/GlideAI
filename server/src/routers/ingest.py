@@ -10,7 +10,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Depends
 
 from config import CHUNKS_DIR, UPLOAD_DIR
 
-from tasks import celery_app, run_ingestion
+from server.src.jobs.tasks import celery_app, run_ingestion
 
 logger = logging.getLogger("server.routers.ingest")
 

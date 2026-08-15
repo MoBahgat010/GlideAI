@@ -68,8 +68,8 @@ class HybridReranker:
         return top_results
 
     def _score(self, query: str, candidates: list[str]) -> list[float]:
-        query_data = np.array([str(query)], dtype=object).reshape(-1, 1)
-        candidates_data = np.array([str(c) for c in candidates], dtype=object).reshape(-1, 1)
+        query_data = np.array([[str(query)]], dtype=object)
+        candidates_data = np.array([[str(c) for c in candidates]], dtype=object)
 
         infer_query = grpcclient.InferInput("QUERY", query_data.shape, "BYTES")
         infer_query.set_data_from_numpy(query_data)
@@ -84,4 +84,7 @@ class HybridReranker:
             inputs=[infer_query, infer_candidates],
             outputs=[infer_out],
         )
-        return response.as_numpy("SCORES").tolist()
+        scores = response.as_numpy("SCORES")
+        if scores is not None:
+            return scores.flatten().tolist()
+        return [0.0] * len(candidates)

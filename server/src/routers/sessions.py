@@ -7,7 +7,7 @@ from server.src.auth.dependencies import get_current_user
 from server.src.db.mongo import get_database
 from server.src.db.redis import get_redis_client
 from server.src.models.schemas import SessionCreate, SessionEndResponse, SessionResponse
-from tasks import extract_session_memory
+from server.src.jobs.tasks import extract_session_memory
 
 router = APIRouter(prefix="/api/sessions", tags=["Sessions"])
 

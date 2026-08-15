@@ -27,7 +27,7 @@ output [
   {
     name: "EMBEDDING"
     data_type: TYPE_FP32
-    dims: [ -1, 768 ]
+    dims: [ 768 ]
   }
 ]
 

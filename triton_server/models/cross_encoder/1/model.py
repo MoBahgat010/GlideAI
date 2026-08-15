@@ -5,6 +5,7 @@ Unloads candidate lists and queries from all incoming Triton batch requests firs
 Constructs a single flat list of (query, candidate) pairs across requests,
 executes a single batched GPU forward pass, and maps scores back using an offset list.
 """
+import functools
 import numpy as np
 import torch
 import triton_python_backend_utils as pb_utils
@@ -74,7 +75,7 @@ class TritonPythonModel:
             # Step 3: Map scores back using request boundary offsets
             for req_idx, start_idx, end_idx in request_offsets:
                 req_scores = all_scores[start_idx:end_idx]
-                out_tensor = pb_utils.Tensor("SCORES", np.array(req_scores, dtype=np.float32))
+                out_tensor = pb_utils.Tensor("SCORES", np.array([req_scores], dtype=np.float32))
                 results[req_idx] = pb_utils.InferenceResponse(output_tensors=[out_tensor])
 
         torch.cuda.empty_cache()

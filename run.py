@@ -16,7 +16,7 @@ def run_triton():
 def run_celery():
     """Start the Celery background worker process."""
     print("Starting Celery Worker Process...")
-    subprocess.run(["celery", "-A", "server.src.celery", "worker", "--loglevel=info", "--pool=solo"])
+    subprocess.run(["celery", "-A", "server.src.jobs.tasks", "worker", "--loglevel=info", "--pool=solo"])
 
 
 def main():

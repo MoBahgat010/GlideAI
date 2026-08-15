@@ -1,5 +1,5 @@
+from weaviate.config import AdditionalConfig, Timeout
 import logging
-import uuid
 from typing import Any
 
 import weaviate
@@ -10,6 +10,7 @@ from weaviate.classes.config import Configure, DataType, Property
 from weaviate.classes.query import Filter, MetadataQuery
 from weaviate.util import generate_uuid5
 from .vector_storage_strategy import VectorDatabaseStrategy
+from config import EMBED_BATCH
 
 logger = logging.getLogger("storage.weaviate")
 
@@ -27,6 +28,7 @@ class WeaviateVDB(VectorDatabaseStrategy):
         self.client = weaviate.connect_to_weaviate_cloud(
             cluster_url=endpoint,
             auth_credentials=Auth.api_key(api_key),
+            additional_config=AdditionalConfig(timeout=Timeout(init=30, query=60, insert=120))
         )
 
         if not self.client.collections.exists(self.index):
@@ -95,10 +97,12 @@ class WeaviateVDB(VectorDatabaseStrategy):
 
         logger.info("Upserting %d chunks into Weaviate collection '%s'...", len(chunks), self.index)
 
-        with self.collection.batch.dynamic() as batch:
+        with self.collection.batch.fixed_size(batch_size=EMBED_BATCH, concurrent_requests=2) as batch:
             for chunk, embedding in zip(chunks, embeddings):
                 if isinstance(embedding, dict) and "embedding" in embedding:
                     embedding = embedding["embedding"]
+
+                logger.debug("EMbedding dimensions: %s", embedding.shape)
 
                 metadata = dict(chunk.metadata)
                 chunk_id = metadata.get("custom_id")
@@ -110,7 +114,7 @@ class WeaviateVDB(VectorDatabaseStrategy):
                     "file_name": metadata.get("file_name"),
                     "page": metadata.get("page"),
                     "bbox": metadata.get("bbox"),
-                    "image_base64": metadata.get("image_base64") or metadata.get("image_path"),
+                    "image_base64": metadata.get("image_base64"),
                     "linked_content_id": metadata.get("linked_content_id"),
                 }
 
@@ -123,6 +127,12 @@ class WeaviateVDB(VectorDatabaseStrategy):
                     vector=embedding,
                     uuid=obj_uuid,
                 )
+
+        if self.collection.batch.failed_objects:
+            failed_objects = self.collection.batch.failed_objects
+            logger.error("Failed to upsert %d objects", len(failed_objects))
+            for f in failed_objects[:10]:
+                logger.error("  uuid=%s error=%s", getattr(f, "original_uuid", f), getattr(f, "message", ""))
 
         logger.info("Finished upserting batch of %d chunks to Weaviate (deterministic UUIDs enforced).", len(chunks))
 
