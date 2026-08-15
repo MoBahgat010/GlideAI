@@ -1,21 +1,9 @@
-"""
-Pre-download both model weights into the HuggingFace cache before starting
-Triton.  The Triton container mounts the same cache directory, so models are
-immediately available without any network call at runtime.
-
-Run once on the host (NOT inside the container):
-    python triton_server/scripts/download_models.py
-"""
 import torch
 from huggingface_hub import login
 from transformers import AutoModel, AutoProcessor, AutoTokenizer, BitsAndBytesConfig
-import os
+from config import EMBEDDING_MODEL, RERANKER_MODEL, HF_TOKEN
 
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "google/siglip-large-patch16-384")
-RERANKER_MODEL = os.getenv("RERANKER_MODEL", "jinaai/jina-reranker-m0")
-HF_TOKEN = os.getenv("HF_TOKEN", "")
-if HF_TOKEN:
-    login(HF_TOKEN)
+login(HF_TOKEN)
 
 print("=" * 60)
 print(f"Downloading {EMBEDDING_MODEL} (encoder)...")

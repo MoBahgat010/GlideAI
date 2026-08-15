@@ -1,6 +1,6 @@
 from langchain.agents.middleware import SummarizationMiddleware
-from server.src.services.agent.middlewares.base_middleware import BaseMiddleware
-from server.src.services.agent.models.summarizer import summarizer
+from src.services.agent.models.summarizer import summarizer
+from src.services.agent.middlewares.base_middleware import BaseMiddleware
 from config import TOKEN_THRESHOLD
 
 class CustomSummarizationMiddleware(BaseMiddleware, SummarizationMiddleware):

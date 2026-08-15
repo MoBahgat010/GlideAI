@@ -21,7 +21,7 @@ class VectorDatabaseStrategy(ABC):
         pass
 
     @abstractmethod
-    def hybrid_query(self, query_text: str, vector: list[float], top_k: int, alpha: float) -> list[dict[str, Any]]:
+    def hybrid_query(self, query_text: str, vector: list[float], top_k: int, alpha: float, session_id: str) -> list[dict[str, Any]]:
         pass
 
     @abstractmethod

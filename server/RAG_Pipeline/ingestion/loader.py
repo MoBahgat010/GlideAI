@@ -1,5 +1,4 @@
 import logging
-
 from langchain_core.documents import Document
 from langchain_opendataloader_pdf import OpenDataLoaderPDFLoader
 
@@ -17,8 +16,8 @@ class PDFLoader:
             image_format="png",
             table_method="cluster",
             split_pages=False,
-            quiet=False,
+            quiet=True,
         ).load()
 
-        logger.info("Loaded %d document(s)", len(docs))
+        logger.info("Loaded %s document(s)", folder_path)
         return docs

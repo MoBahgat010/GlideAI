@@ -2,28 +2,21 @@ import os
 import uuid
 import logging
 import datetime
-from typing import AsyncGenerator, List, Union
+from typing import AsyncGenerator, Dict, Any, Optional
 
 from config import REDIS_URL
+
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
-from server.src.services.agent.models.orchestrator import orchestrator
-from server.src.services.agent.system_prompt import SYSTEM_PROMPT
-from server.src.services.agent.middlewares.base_middleware import BaseMiddleware
-from server.src.services.agent.tools.base_tools import Tools
-# Explicitly import tools to ensure registration
-import server.src.services.agent.tools.RAG_retrieval
-import server.src.services.agent.tools.document_summarizer
-import server.src.services.agent.tools.python_calculator
-
-from langgraph.checkpoint.redis import RedisSaver
-from langgraph.checkpoint.memory import InMemorySaver
+from langchain_community.chat_message_histories import RedisChatMessageHistory
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.types import Command
-from server.src.services.agent.mcp.base_mcp import get_mcp_tools, McpSessions
 
-load_dotenv(override=True)
+from .models.orchestrator import orchestrator
+from .system_prompt import SYSTEM_PROMPT
+from .middlewares.base_middleware import BaseMiddleware
+from .tools.base_tools import Tools
+from .mcp.base_mcp import get_mcp_tools, McpSessions
+
 logger = logging.getLogger("agent.workflow")
 
 
@@ -34,13 +27,7 @@ class AgenticRAG:
         self.system_prompt = SYSTEM_PROMPT.format(today_date=self.today_date)
         self.middleware = BaseMiddleware.registry
         self.recursion_limit = recursion_limit
-
-        try:
-            logger.info("Connecting Redis checkpointer for Agentic RAG working memory: %s", redis_url)
-            self.checkpointer = RedisSaver.from_conn_info(url=redis_url)
-        except Exception as exc:
-            logger.warning("Redis checkpointer failed to initialize (%s), falling back to InMemorySaver", exc)
-            self.checkpointer = InMemorySaver()
+        self.redis_url = redis_url
 
         self.mcp_session: McpSessions = None
         self.agent: CompiledStateGraph = None
@@ -52,21 +39,23 @@ class AgenticRAG:
         mcp_tools, self.mcp_session = await get_mcp_tools()
         all_tools = Tools.registry + mcp_tools
 
-        logger.info("Initializing Agentic RAG graph with %d tools and %d middlewares", len(all_tools), len(self.middleware))
+        logger.info("Initializing Agentic RAG graph with %d tools and %d middlewares (Redis backend: %s)", len(all_tools), len(self.middleware), self.redis_url)
         self.agent = create_agent(
             model=self.orchestrator,
             system_prompt=self.system_prompt,
             tools=all_tools,
             middleware=self.middleware,
-            checkpointer=self.checkpointer,
         )
         return self.agent
 
-    async def arun(self, user_message: str, session_id: str = None) -> AsyncGenerator[str, None]:
-        """
-        Stream agent events token by token for stateless API servers.
-        Loads state from Redis using session_id as the thread_id.
-        """
+    def get_redis_history(self, session_id: str) -> RedisChatMessageHistory:
+        return RedisChatMessageHistory(
+            session_id=f"session:{session_id}:working_memory",
+            url=self.redis_url,
+            ttl=7 * 86400,
+        )
+
+    async def astream_response(self, user_message: str, session_id: Optional[str] = None) -> AsyncGenerator[Dict[str, Any], None]:
         await self.init_agent()
 
         active_thread_id = session_id or str(uuid.uuid4())
@@ -75,45 +64,109 @@ class AgenticRAG:
             "recursion_limit": self.recursion_limit,
         }
 
-        logger.info("Running Agentic RAG for session_id=%s", active_thread_id)
-        input_payload = {"messages": [{"role": "user", "content": user_message}]}
+        # Load session history from LangChain Redis storage
+        history_client = self.get_redis_history(active_thread_id)
+        past_msgs = history_client.messages
+
+        messages_input = list(past_msgs) + [{"role": "user", "content": user_message}]
+        input_payload = {"messages": messages_input}
+
+        logger.info("Executing Agentic RAG for session_id=%s with %d prior messages from Redis", active_thread_id, len(past_msgs))
+        collected_tokens = []
 
         async for event in self.agent.astream_events(input_payload, config=config, version="v2"):
             kind = event.get("event")
+
             if kind == "on_chat_model_stream":
                 chunk = event.get("data", {}).get("chunk")
                 if chunk and hasattr(chunk, "content") and chunk.content:
-                    yield chunk.content
+                    token_text = str(chunk.content)
+                    collected_tokens.append(token_text)
+                    yield {"type": "token", "content": token_text}
+
             elif kind == "on_tool_start":
-                tool_name = event.get("name")
+                tool_name = event.get("name", "tool")
                 tool_input = event.get("data", {}).get("input", "")
-                yield f"\n\n**Executing Tool:** `{tool_name}` with input: `{tool_input}`...\n\n"
+                yield {
+                    "type": "step",
+                    "name": tool_name,
+                    "input": str(tool_input)[:300],
+                }
+
             elif kind == "on_tool_end":
-                tool_name = event.get("name")
+                tool_name = event.get("name", "tool")
                 tool_output = event.get("data", {}).get("output", "")
                 if hasattr(tool_output, "content"):
-                    output_str = tool_output.content
+                    out_text = tool_output.content
                 elif isinstance(tool_output, list):
-                    output_str = "\n".join(
-                        item.get("text", str(item)) if isinstance(item, dict) else str(item) for item in tool_output
-                    )
+                    out_text = "\n".join(str(x) for x in tool_output)
                 else:
-                    output_str = str(tool_output)
-                yield f"**Tool `{tool_name}` finished:**\n```\n{output_str}\n```\n\n"
+                    out_text = str(tool_output)
 
-    async def resume(self, decisions: List, session_id: str) -> AsyncGenerator[str, None]:
-        await self.init_agent()
-        config = {
-            "configurable": {"thread_id": session_id},
-            "recursion_limit": self.recursion_limit,
-        }
-        payload = Command(resume={"decisions": decisions})
-        async for token in self.agent.astream_events(payload, config=config, version="v2"):
-            kind = token.get("event")
-            if kind == "on_chat_model_stream":
-                chunk = token.get("data", {}).get("chunk")
-                if chunk and hasattr(chunk, "content") and chunk.content:
-                    yield chunk.content
+                yield {
+                    "type": "step_result",
+                    "name": tool_name,
+                    "output": out_text[:500] if len(out_text) > 500 else out_text,
+                }
+
+                if tool_name == "rag_retrieval" and "--- Result" in out_text:
+                    citations = []
+                    chunks_raw = out_text.split("--- Result ")
+                    for cr in chunks_raw:
+                        if not cr.strip():
+                            continue
+                        c_dict = {}
+                        first_line = cr.split("\n", 1)[0]
+                        if "---" in first_line:
+                            try:
+                                c_dict["index"] = int(first_line.replace("---", "").strip())
+                            except Exception:
+                                pass
+
+                        for line in cr.split("\n"):
+                            line = line.strip()
+                            if line.startswith("Chunk ID:"):
+                                c_dict["custom_id"] = line.split(":", 1)[1].strip()
+                            elif line.startswith("File Name:"):
+                                c_dict["file_name"] = line.split(":", 1)[1].strip()
+                            elif line.startswith("Page:"):
+                                try:
+                                    c_dict["page"] = int(line.split(":", 1)[1].strip())
+                                except Exception:
+                                    pass
+                            elif line.startswith("Time:"):
+                                c_dict["time_range"] = line.split(":", 1)[1].strip()
+                            elif line.startswith("BBox:"):
+                                c_dict["bbox"] = line.split(":", 1)[1].strip()
+                            elif line.startswith("Type:"):
+                                c_dict["type"] = line.split(":", 1)[1].strip()
+                            elif line.startswith("Rerank Score:"):
+                                try:
+                                    c_dict["score"] = float(line.split(":", 1)[1].strip())
+                                except Exception:
+                                    pass
+                            elif line.startswith("Content:"):
+                                c_dict["text"] = cr.split("Content:\n", 1)[-1].strip()
+
+                        if c_dict.get("file_name"):
+                            if "index" not in c_dict:
+                                c_dict["index"] = len(citations) + 1
+                            citations.append(c_dict)
+                    if citations:
+                        yield {"type": "sources", "citations": citations}
+
+        # Persist conversation turn to LangChain Redis history
+        try:
+            history_client.add_user_message(user_message)
+            if collected_tokens:
+                history_client.add_ai_message("".join(collected_tokens))
+        except Exception as exc:
+            logger.warning("Failed to append conversation turn to Redis history: %s", exc)
+
+    async def arun(self, user_message: str, session_id: Optional[str] = None) -> AsyncGenerator[str, None]:
+        async for event in self.astream_response(user_message, session_id):
+            if event["type"] == "token":
+                yield event["content"]
 
     def cleanup(self):
         if self.mcp_session:

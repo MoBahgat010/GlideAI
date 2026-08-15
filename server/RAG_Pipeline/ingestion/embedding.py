@@ -18,7 +18,6 @@ class MultimodalEncoder:
 
     @staticmethod
     def _str_tensor(name: str, items: List[str]) -> grpcclient.InferInput:
-        """Build a BYTES InferInput from a list of plain strings with batch dimension."""
         arr = np.array([str(x) for x in items], dtype=object).reshape(-1, 1)
         inp = grpcclient.InferInput(name, arr.shape, "BYTES")
         inp.set_data_from_numpy(arr)
@@ -73,13 +72,15 @@ class MultimodalEncoder:
         return final_embeddings
 
     def encode_query(self, query: str) -> List[float]:
-        """Encode a single search query string using bi_encoder_retrieval."""
-        response = self._client.infer(
-            model_name="bi_encoder_retrieval",
-            inputs=[self._str_tensor("TEXT", [str(query)])],
-            outputs=[grpcclient.InferRequestedOutput("EMBEDDING")],
-        )
-        result = response.as_numpy("EMBEDDING")
-        if result is not None and len(result) > 0:
-            return result[0].tolist()
+        try:
+            response = self._client.infer(
+                model_name="bi_encoder_retrieval",
+                inputs=[self._str_tensor("TEXT", [str(query)])],
+                outputs=[grpcclient.InferRequestedOutput("EMBEDDING")],
+            )
+            result = response.as_numpy("EMBEDDING")
+            if result is not None and len(result) > 0:
+                return result[0].tolist()
+        except Exception as exc:
+            logger.error("Query encoding failed: %s", exc)
         return [0.0] * self.d_model

@@ -1,20 +1,16 @@
 import logging
-import sys
+import json
 from pathlib import Path
+import sys
+from urllib import request
 from celery import Celery
+import redis
+import pymongo
+from openai import OpenAI
+
+from server.RAG_Pipeline.ingestion.execute import ingestion_pipeline
 from .extraction_pompt import EXTRACTION_PROMPT
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s — %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger("tasks")
-
 from config import (
-    EMBED_BATCH,
     REDIS_URL,
     MONGODB_URL,
     MONGODB_DB_NAME,
@@ -22,13 +18,11 @@ from config import (
     BASE_URL,
     API_KEY,
     TRITON_HTTP_URL,
+    ENABLE_SEMANTIC_MEMORY,
+    ENABLE_EPISODIC_MEMORY,
 )
-from RAG_Pipeline.ingestion.execute import ingestion_pipeline
-import json
-import redis
-import pymongo
-from openai import OpenAI
-from urllib import request
+
+logger = logging.getLogger("server.jobs.tasks")
 
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 mongo_client = pymongo.MongoClient(MONGODB_URL)
@@ -53,43 +47,53 @@ celery_app = Celery(
 )
 
 
-@celery_app.task(bind=True)
-def run_ingestion(self, job_id: str, storage_keys: str) -> dict:
-    logger.info("Starting ingestion task for job_id=%s, storage_keys=%s", job_id, storage_keys)
+@celery_app.task(name="run_ingestion", bind=True)
+def run_ingestion(self, job_id: str, storage_keys: str, session_id: str = "default") -> dict:
+    """Asynchronously process document & media files for a session and upsert to Weaviate with session filtering."""
+    logger.info("Starting ingestion task job_id=%s, path=%s, session_id=%s", job_id, storage_keys, session_id)
     self.update_state(
         state="PROGRESS",
-        meta={"stage": "PARSING", "message": "Loading document(s)...", "pct": 0.1},
+        meta={"stage": "PARSING", "message": "Parsing document layout & transcribing media via Rev AI...", "pct": 0.2},
     )
 
     try:
         self.update_state(
             state="PROGRESS",
-            meta={"stage": "PROCESSING", "message": "Extracting text and chunking...", "pct": 0.3},
+            meta={"stage": "PROCESSING", "message": "Semantic chunking & Cloudinary visual uploads...", "pct": 0.5},
         )
 
-        ingestion_pipeline.run_pipeline(storage_keys)
+        ingestion_pipeline.run_pipeline(storage_keys, session_id=session_id)
 
         self.update_state(
             state="PROGRESS",
-            meta={"stage": "EMBEDDING", "message": "Indexing chunks to Weaviate...", "pct": 0.8},
+            meta={"stage": "EMBEDDING", "message": "Multi-modal indexing to Weaviate complete.", "pct": 1.0},
         )
 
-        result_meta = {"job_id": job_id, "status": "completed", "file": storage_keys}
-        logger.info("Ingestion completed for job_id=%s", job_id)
-        return result_meta
+        logger.info("Ingestion completed successfully for session_id=%s", session_id)
+        return {"job_id": job_id, "status": "completed", "path": storage_keys, "session_id": session_id}
 
     except Exception as exc:
-        logger.exception("Ingestion task failed for job_id=%s: %s", job_id, exc)
+        logger.exception("Ingestion task failed for session_id=%s: %s", session_id, exc)
         raise exc
 
 
-@celery_app.task(bind=True)
-def extract_session_memory(self, session_id: str, user_id: str | None = None) -> dict:
-    logger.info("Starting memory extraction for session_id=%s, user_id=%s", session_id, user_id)
+@celery_app.task(name="extract_session_memory", bind=True)
+def extract_session_memory(self, session_id: str, user_id: str = "default") -> dict:
+    """Extract episodic events and semantic facts from session transcript based on feature flags."""
+    logger.info("Starting memory extraction for session_id=%s (flags: semantic=%s, episodic=%s)", session_id, ENABLE_SEMANTIC_MEMORY, ENABLE_EPISODIC_MEMORY)
+
+    if not ENABLE_SEMANTIC_MEMORY and not ENABLE_EPISODIC_MEMORY:
+        logger.info("Memory extraction feature flags are disabled. Skipping extraction for session %s", session_id)
+        db.sessions.update_one(
+            {"session_id": session_id},
+            {"$set": {"status": "ended", "memory_extracted": False, "ended_at": pymongo.datetime.datetime.utcnow()}},
+        )
+        return {"session_id": session_id, "status": "skipped_disabled"}
+
     self.update_state(
         state="PROGRESS",
-        meta={"stage": "FETCHING_HISTORY", "message": "Reading session chat history...", "pct": 0.2},
-    )    
+        meta={"stage": "FETCHING_HISTORY", "message": "Reading conversation transcript...", "pct": 0.2},
+    )
 
     key = f"session:{session_id}:working_memory"
     raw_history = redis_client.get(key)
@@ -97,6 +101,10 @@ def extract_session_memory(self, session_id: str, user_id: str | None = None) ->
 
     if not history:
         logger.info("No history found in Redis for session_id=%s", session_id)
+        db.sessions.update_one(
+            {"session_id": session_id},
+            {"$set": {"status": "ended", "memory_extracted": False, "ended_at": pymongo.datetime.datetime.utcnow()}},
+        )
         return {"session_id": session_id, "status": "no_history"}
 
     formatted_transcript = "\n".join(
@@ -105,17 +113,16 @@ def extract_session_memory(self, session_id: str, user_id: str | None = None) ->
 
     self.update_state(
         state="PROGRESS",
-        meta={"stage": "EXTRACTING_MEMORY", "message": "Running LLM memory extraction...", "pct": 0.5},
+        meta={"stage": "EXTRACTING_MEMORY", "message": "Synthesizing episodic & semantic memories...", "pct": 0.6},
     )
 
-    llmongo_client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
-
-    extraction_prompt = EXTRACTION_PROMPT.format(formatted_transcript=formatted_transcript)
+    llm_client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+    prompt = EXTRACTION_PROMPT.format(formatted_transcript=formatted_transcript)
 
     try:
-        response = llmongo_client.chat.completions.create(
+        response = llm_client.chat.completions.create(
             model=SUMMARIZER,
-            messages=[{"role": "user", "content": extraction_prompt}],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
         )
         content = response.choices[0].message.content or ""
@@ -134,41 +141,39 @@ def extract_session_memory(self, session_id: str, user_id: str | None = None) ->
                 "user_preferences": [],
             }
 
-        self.update_state(
-            state="PROGRESS",
-            meta={"stage": "PERSISTING", "message": "Saving memories to MongoDB...", "pct": 0.8},
-        )
+        now = pymongo.datetime.datetime.utcnow()
 
-        doc_episodic = {
-            "session_id": session_id,
-            "user_id": user_id,
-            "summary": parsed.get("episodic_summary", ""),
-            "key_events": parsed.get("key_events", []),
-            "created_at": pymongo.datetime.datetime.utcnow(),
-        }
-        db.episodic_memories.insert_one(doc_episodic)
+        if ENABLE_EPISODIC_MEMORY:
+            doc_episodic = {
+                "session_id": session_id,
+                "user_id": user_id,
+                "summary": parsed.get("episodic_summary", ""),
+                "key_events": parsed.get("key_events", []),
+                "created_at": now,
+            }
+            db.episodic_memories.replace_one({"session_id": session_id}, doc_episodic, upsert=True)
 
-        doc_semantic = {
-            "session_id": session_id,
-            "user_id": user_id,
-            "facts": parsed.get("semantic_facts", []),
-            "preferences": parsed.get("user_preferences", []),
-            "created_at": pymongo.datetime.datetime.utcnow(),
-        }
-        db.semantic_memories.insert_one(doc_semantic)
+        if ENABLE_SEMANTIC_MEMORY:
+            doc_semantic = {
+                "session_id": session_id,
+                "user_id": user_id,
+                "facts": parsed.get("semantic_facts", []),
+                "preferences": parsed.get("user_preferences", []),
+                "created_at": now,
+            }
+            db.semantic_memories.replace_one({"session_id": session_id}, doc_semantic, upsert=True)
 
-        # Update session status
         db.sessions.update_one(
             {"session_id": session_id},
-            {"$set": {"status": "ended", "memory_extracted": True, "ended_at": pymongo.datetime.datetime.utcnow()}},
+            {"$set": {"status": "ended", "memory_extracted": True, "ended_at": now}},
         )
 
-        logger.info("Successfully extracted and persisted memories for session_id=%s", session_id)
+        logger.info("Successfully persisted extracted memories for session_id=%s", session_id)
         return {
             "session_id": session_id,
             "status": "success",
-            "episodic_events_count": len(parsed.get("key_events", [])),
-            "semantic_facts_count": len(parsed.get("semantic_facts", [])),
+            "episodic_events": len(parsed.get("key_events", [])),
+            "semantic_facts": len(parsed.get("semantic_facts", [])),
         }
 
     except Exception as exc:

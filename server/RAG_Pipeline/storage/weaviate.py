@@ -1,16 +1,17 @@
-from weaviate.config import AdditionalConfig, Timeout
 import logging
-from typing import Any
-
+from typing import Any, Optional
 import weaviate
 from langchain_core.documents import Document
 from langchain_weaviate import WeaviateVectorStore
-from weaviate.classes.init import Auth
 from weaviate.classes.config import Configure, DataType, Property
+from weaviate.classes.init import Auth
 from weaviate.classes.query import Filter, MetadataQuery
+from weaviate.config import AdditionalConfig, Timeout
 from weaviate.util import generate_uuid5
-from .vector_storage_strategy import VectorDatabaseStrategy
+
 from config import EMBED_BATCH
+
+from .vector_storage_strategy import VectorDatabaseStrategy
 
 logger = logging.getLogger("storage.weaviate")
 
@@ -28,7 +29,7 @@ class WeaviateVDB(VectorDatabaseStrategy):
         self.client = weaviate.connect_to_weaviate_cloud(
             cluster_url=endpoint,
             auth_credentials=Auth.api_key(api_key),
-            additional_config=AdditionalConfig(timeout=Timeout(init=30, query=60, insert=120))
+            additional_config=AdditionalConfig(timeout=Timeout(init=30, query=60, insert=120)),
         )
 
         if not self.client.collections.exists(self.index):
@@ -37,12 +38,16 @@ class WeaviateVDB(VectorDatabaseStrategy):
                 vector_config=Configure.Vectors.self_provided(),
                 properties=[
                     Property(name="custom_id", data_type=DataType.TEXT),
+                    Property(name="session_id", data_type=DataType.TEXT),
                     Property(name="chunk_text", data_type=DataType.TEXT),
                     Property(name="type", data_type=DataType.TEXT),
                     Property(name="file_name", data_type=DataType.TEXT),
                     Property(name="page", data_type=DataType.INT),
+                    Property(name="start_time", data_type=DataType.NUMBER),
+                    Property(name="end_time", data_type=DataType.NUMBER),
                     Property(name="bbox", data_type=DataType.NUMBER_ARRAY),
                     Property(name="image_base64", data_type=DataType.TEXT),
+                    Property(name="cloudinary_url", data_type=DataType.TEXT),
                     Property(name="linked_content_id", data_type=DataType.TEXT),
                 ],
             )
@@ -79,11 +84,7 @@ class WeaviateVDB(VectorDatabaseStrategy):
     ) -> list[str]:
         if embeddings is not None:
             self.upsert(documents, embeddings)
-            return [
-                doc.metadata.get("custom_id")
-                for doc in documents
-            ]
-
+            return [doc.metadata.get("custom_id") for doc in documents if doc.metadata.get("custom_id")]
         vectorstore = self.as_vectorstore(**kwargs)
         return vectorstore.add_documents(documents)
 
@@ -91,7 +92,7 @@ class WeaviateVDB(VectorDatabaseStrategy):
         self,
         chunks: list[Document],
         embeddings: list[list[float]],
-    ):  
+    ):
         if len(chunks) != len(embeddings):
             raise ValueError("Number of chunks and embeddings must match.")
 
@@ -102,26 +103,28 @@ class WeaviateVDB(VectorDatabaseStrategy):
                 if isinstance(embedding, dict) and "embedding" in embedding:
                     embedding = embedding["embedding"]
 
-                logger.debug("EMbedding dimensions: %s", embedding.shape)
+                logger.debug("Embedding dimensions: %s", len(embedding))
 
                 metadata = dict(chunk.metadata)
                 chunk_id = metadata.get("custom_id")
 
                 properties = {
                     "custom_id": chunk_id,
+                    "session_id": metadata.get("session_id"),
                     "chunk_text": chunk.page_content,
                     "type": metadata.get("type"),
                     "file_name": metadata.get("file_name"),
-                    "page": metadata.get("page"),
-                    "bbox": metadata.get("bbox"),
+                    "page": metadata.get("page", None),
+                    "start_time": metadata.get("start_time", None),
+                    "end_time": metadata.get("end_time", None),
+                    "bbox": metadata.get("bbox", None),
                     "image_base64": metadata.get("image_base64"),
-                    "linked_content_id": metadata.get("linked_content_id"),
+                    "cloudinary_url": metadata.get("cloudinary_url"),
+                    "linked_content_id": metadata.get("linked_content_id", None),
                 }
-
                 properties = {k: v for k, v in properties.items() if v is not None}
 
                 obj_uuid = generate_uuid5(chunk_id)
-
                 batch.add_object(
                     properties=properties,
                     vector=embedding,
@@ -129,12 +132,7 @@ class WeaviateVDB(VectorDatabaseStrategy):
                 )
 
         if self.collection.batch.failed_objects:
-            failed_objects = self.collection.batch.failed_objects
-            logger.error("Failed to upsert %d objects", len(failed_objects))
-            for f in failed_objects[:10]:
-                logger.error("  uuid=%s error=%s", getattr(f, "original_uuid", f), getattr(f, "message", ""))
-
-        logger.info("Finished upserting batch of %d chunks to Weaviate (deterministic UUIDs enforced).", len(chunks))
+            logger.error("Failed to upsert %d objects", len(self.collection.batch.failed_objects))
 
     def hybrid_query(
         self,
@@ -142,12 +140,19 @@ class WeaviateVDB(VectorDatabaseStrategy):
         vector: list[float],
         top_k: int,
         alpha: float,
+        session_id: Optional[str] = None,
     ) -> list[dict[str, Any]]:
+        """Run hybrid similarity/keyword search with session_id metadata filtering."""
+        filters = None
+        if session_id:
+            filters = Filter.by_property("session_id").equal(session_id)
+
         response = self.collection.query.hybrid(
             query=query_text,
             vector=vector,
             alpha=alpha,
             limit=top_k,
+            filters=filters,
             return_metadata=MetadataQuery(score=True, distance=True),
         )
 

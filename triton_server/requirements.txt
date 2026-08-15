@@ -1,0 +1,7 @@
+torch>=2.2.0
+transformers==5.8.1
+huggingface-hub>=0.23.0
+tritonclient[grpc]>=2.48.0
+numpy>=1.26.0
+pillow>=10.4.0
+python-dotenv>=1.0.1

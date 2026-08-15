@@ -1,17 +1,11 @@
 import asyncio
 import logging
-from typing import Callable, Any
-
-from openai import AsyncOpenAI
-
-from RAG_Pipeline.storage import VDB
-from RAG_Pipeline.ingestion.embedding import MultimodalEncoder
+from typing import Optional
+from ..storage.vector_database import VDB
+from ..ingestion.embedding import MultimodalEncoder
 from .reranker import HybridReranker
 
 logger = logging.getLogger("retrieval.pipeline")
-
-Progress = Callable[[str, str], None]   # (stage, message)
-
 
 class RetrievalPipeline:
     def __init__(
@@ -28,9 +22,16 @@ class RetrievalPipeline:
         self.retrieve_top_k = retrieve_top_k
         self.rerank_top_k = rerank_top_k
 
-    async def retrieve(self, query: str) -> dict:
+    async def retrieve(self, query: str, session_id: Optional[str] = None) -> dict:
+        logger.info("Executing retrieval for query=%r, session_id=%s", query[:80], session_id)
         embedding = self.encoder.encode_query(query)
-        candidates = self.vdb.hybrid_query(query, embedding, self.retrieve_top_k, 0.5)
+        candidates = self.vdb.hybrid_query(
+            query_text=query,
+            vector=embedding,
+            top_k=self.retrieve_top_k,
+            alpha=0.5,
+            session_id=session_id,
+        )
         top_results = self.reranker.rerank(query, candidates, self.rerank_top_k)
 
         await self._enrich_linked_content(top_results, candidates)
@@ -59,12 +60,14 @@ class RetrievalPipeline:
 
         fetched_map: dict[str, dict] = {}
         if ids_to_fetch:
-            logger.info("Fetching %d linked content records from Weaviate", len(ids_to_fetch))
-            fetched_list = await asyncio.to_thread(self.vdb.fetch_batch, list(ids_to_fetch))
-            for rec in fetched_list:
-                rec_id = rec.get("custom_id")
-                if rec_id:
-                    fetched_map[rec_id] = rec
+            try:
+                fetched_list = await asyncio.to_thread(self.vdb.fetch_batch, list(ids_to_fetch))
+                for rec in fetched_list:
+                    rec_id = rec.get("custom_id")
+                    if rec_id:
+                        fetched_map[rec_id] = rec
+            except Exception as exc:
+                logger.warning("Failed to fetch linked content batch: %s", exc)
 
         for r in results:
             lid = r.get("linked_content_id")
@@ -72,11 +75,8 @@ class RetrievalPipeline:
                 linked = candidate_map.get(lid) or fetched_map.get(lid)
                 if linked:
                     linked_obj = dict(linked)
-                    is_image = linked_obj.get("type") == "image"
-                    if is_image:
-                        b64 = linked_obj.get("image_base64")
-                        r["linked_image"] = b64
+                    if linked_obj.get("type") == "image":
+                        r["linked_image"] = linked_obj.get("image_base64")
+                        if linked_obj.get("cloudinary_url"):
+                            r["linked_cloudinary_url"] = linked_obj.get("cloudinary_url")
                     r["linked_content"] = linked_obj
-                    logger.debug("Attached linked content %s to chunk %s", lid, r.get("custom_id"))
-                else:
-                    logger.debug("Linked content %s not found for chunk %s", lid, r.get("custom_id"))

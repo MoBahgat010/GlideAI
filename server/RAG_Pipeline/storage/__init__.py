@@ -1,11 +1,12 @@
 from .vector_database import VDB
 from .vector_storage_strategy import VectorDatabaseStrategy
 from .weaviate import WeaviateVDB
-from .pinecone import PineconeVDB
+from .cloudinary_storage import CloudinaryStorage, cloudinary_client
 
 __all__ = [
     "VDB",
     "VectorDatabaseStrategy",
     "WeaviateVDB",
-    "PineconeVDB",
+    "CloudinaryStorage",
+    "cloudinary_client",
 ]

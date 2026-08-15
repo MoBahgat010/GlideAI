@@ -1,0 +1,24 @@
+services:
+  triton:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    image: enterprise-rag-triton:prod
+    container_name: enterprise-rag-triton-prod
+    runtime: nvidia
+    env_file:
+      - ./.env
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+    ports:
+      - "8000:8000"   # HTTP
+      - "8001:8001"   # gRPC
+      - "8002:8002"   # Prometheus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped

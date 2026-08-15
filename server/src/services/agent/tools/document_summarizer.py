@@ -1,7 +1,7 @@
 import logging
 from langchain_core.tools import tool
-from server.src.services.agent.models.summarizer import summarizer
-from server.src.services.agent.tools.base_tools import Tools
+from ..models.summarizer import summarizer
+from .base_tools import Tools
 
 logger = logging.getLogger("agent.tools.document_summarizer")
 

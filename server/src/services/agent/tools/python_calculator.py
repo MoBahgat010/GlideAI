@@ -1,7 +1,7 @@
 import math
 import logging
 from langchain_core.tools import tool
-from server.src.services.agent.tools.base_tools import Tools
+from .base_tools import Tools
 
 logger = logging.getLogger("agent.tools.python_calculator")
 

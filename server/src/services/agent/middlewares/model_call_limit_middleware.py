@@ -1,5 +1,5 @@
 from langchain.agents.middleware import ModelCallLimitMiddleware
-from server.src.services.agent.middlewares.base_middleware import BaseMiddleware
+from .base_middleware import BaseMiddleware
 from config import RUN_LIMIT
 
 class CustomModelCallLimitMiddleware(BaseMiddleware, ModelCallLimitMiddleware):

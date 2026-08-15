@@ -3,8 +3,8 @@ import subprocess
 
 def run_server():
     """Start the FastAPI backend server."""
-    print("Starting FastAPI Server")
-    subprocess.run(["python3", "server/src/main.py"])
+    print("Starting Enterprise FastAPI Server...")
+    subprocess.run(["python3", "server/main.py"])
 
 
 def run_triton():
@@ -21,7 +21,7 @@ def run_celery():
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python run.py [server | triton | celery]")
+        print("Usage: python run.py [fastapi | triton | celery]")
         sys.exit(1)
 
     command = sys.argv[1].lower()

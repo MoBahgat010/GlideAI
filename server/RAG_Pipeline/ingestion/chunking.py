@@ -1,4 +1,6 @@
-from typing import Any
+import json
+import logging
+from typing import Any, Optional
 from langchain_core.documents import Document
 import json
 
@@ -32,11 +34,15 @@ import json
 #   list."previous list id"  / "next list id"    (cross-page split)
 # ---------------------------------------------------------------------------
 
+from server.RAG_Pipeline.storage.cloudinary_storage import cloudinary_client
+
+logger = logging.getLogger("ingestion.chunking")
+
 _SKIP_TYPES = {"header", "footer"}
 
 
 class SemanticChunker:
-    def __init__(self, max_chars: int, overlap_chars: int):
+    def __init__(self, max_chars: int = 1000, overlap_chars: int = 200):
         self.max_chars = max_chars
         self.overlap_chars = overlap_chars
 
@@ -44,13 +50,12 @@ class SemanticChunker:
     # Public API
     # ------------------------------------------------------------------
 
-    def chunk(self, document: Document, user_id: str = "default") -> list[Document]:
+    def chunk(self, document: Document, session_id: str = "default") -> list[Document]:
         data: dict[str, Any] = json.loads(document.page_content)
 
         file_name = data.get("file name", "")
         docs: list[Document] = []
-
-        print(f"Chunking document: {file_name} for user: {user_id}")
+        logger.info("Chunking document '%s' for session '%s'", file_name, session_id)
 
         for element in data.get("kids", []):
             self._visit(
@@ -58,7 +63,7 @@ class SemanticChunker:
                 docs=docs,
                 heading_stack=[],
                 file_name=file_name,
-                user_id=user_id,
+                session_id=session_id,
             )
 
         return self._merge_small_paragraphs(docs)
@@ -73,7 +78,7 @@ class SemanticChunker:
         docs: list[Document],
         heading_stack: list[str],
         file_name: str,
-        user_id: str,
+        session_id: str,
     ) -> None:
         node_type = node.get("type", "")
 
@@ -89,54 +94,86 @@ class SemanticChunker:
             # Headings do NOT produce their own doc chunk; their text is
             # prepended as context to subsequent leaf chunks.
             for kid in node.get("kids", []):
-                self._visit(kid, docs, heading_stack, file_name, user_id)
+                self._visit(kid, docs, heading_stack, file_name, session_id)
             return
 
         # ---- Paragraph / Caption: leaf text nodes ----
         if node_type in ("paragraph", "caption"):
             docs.extend(
-                self._text_node_to_docs(node, heading_stack, file_name, user_id)
+                self._text_node_to_docs(node, heading_stack, file_name, session_id)
             )
             return
 
-        # ---- Text Block: pure container, recurse into kids ----
+        if node_type == "transcript":
+            docs.extend(
+                self._transcript_node_to_docs(node, heading_stack, file_name, session_id)
+            )
+            return
+
         if node_type == "text block":
             for kid in node.get("kids", []):
-                self._visit(kid, docs, heading_stack, file_name, user_id)
+                self._visit(kid, docs, heading_stack, file_name, session_id)
             return
 
         # ---- List: children live under "list items" (not "kids") ----
         if node_type == "list":
-            self._visit_list(node, docs, heading_stack, file_name, user_id)
+            self._visit_list(node, docs, heading_stack, file_name, session_id)
             return
 
         # ---- List Item: reached when a nested list contains list items
         #      that need to be visited directly (e.g. sub-list recursion) ----
         if node_type == "list item":
-            self._visit_list_item(node, docs, heading_stack, file_name, user_id)
+            self._visit_list_item(node, docs, heading_stack, file_name, session_id)
             return
 
         # ---- Table ----
         if node_type == "table":
             docs.extend(
-                self._table_to_docs(node, heading_stack, file_name, user_id)
+                self._table_to_docs(node, heading_stack, file_name, session_id)
             )
             return
 
         # ---- Image / Figure ----
         if node_type in ("image", "figure"):
-            doc = self._image_to_doc(node, heading_stack, file_name, user_id)
+            doc = self._image_to_doc(node, heading_stack, file_name, session_id)
             if doc:
                 docs.append(doc)
             return
 
         # ---- Unknown / future types: recurse defensively ----
         for kid in node.get("kids", []):
-            self._visit(kid, docs, heading_stack, file_name, user_id)
+            self._visit(kid, docs, heading_stack, file_name, session_id)
 
-    # ------------------------------------------------------------------
-    # List handling
-    # ------------------------------------------------------------------
+    def _transcript_node_to_docs(
+        self,
+        node: dict,
+        headings: list[str],
+        file_name: str,
+        session_id: str,
+    ) -> list[Document]:
+        text = self._get_content(node)
+        if not text:
+            return []
+
+        prefix = "\n".join(filter(None, headings))
+        full_text = f"{prefix}\n\n{text}" if prefix else text
+
+        start_time = float(node.get("start_time", 0.0))
+        end_time = float(node.get("end_time", start_time))
+        raw_id = f"ts_{int(start_time)}_{int(end_time)}"
+        chunk_id = self._make_chunk_id(session_id, file_name, raw_id)
+
+        metadata: dict = {
+            "custom_id": chunk_id,
+            "session_id": session_id,
+            "type": "transcript",
+            "page": node.get("page number", 1),
+            "start_time": start_time,
+            "end_time": end_time,
+            "file_name": file_name,
+        }
+
+        return self._split(full_text, metadata=metadata)
 
     def _visit_list(
         self,
@@ -144,7 +181,7 @@ class SemanticChunker:
         docs: list[Document],
         heading_stack: list[str],
         file_name: str,
-        user_id: str,
+        session_id: str,
     ) -> None:
         """
         A "list" node has children under "list items" (not "kids").
@@ -189,10 +226,11 @@ class SemanticChunker:
             full_text = f"{prefix}\n\n{list_text}" if prefix else list_text
 
             raw_id = node.get("id")
-            chunk_id = self._make_chunk_id(user_id, file_name, raw_id)
+            chunk_id = self._make_chunk_id(session_id, file_name, raw_id)
 
             metadata: dict = {
                 "custom_id": chunk_id,
+                "session_id": session_id,
                 "type": "list",
                 "numbering_style": numbering_style,
                 "page": node.get("page number"),
@@ -203,18 +241,18 @@ class SemanticChunker:
             # Cross-page list continuation links
             if node.get("previous list id") is not None:
                 metadata["previous_list_id"] = self._make_chunk_id(
-                    user_id, file_name, node["previous list id"]
+                    session_id, file_name, node["previous list id"]
                 )
             if node.get("next list id") is not None:
                 metadata["next_list_id"] = self._make_chunk_id(
-                    user_id, file_name, node["next list id"]
+                    session_id, file_name, node["next list id"]
                 )
 
             docs.extend(self._split(full_text, metadata=metadata))
 
         # Recurse into nested sub-lists and other block children
         for nested in nested_nodes:
-            self._visit(nested, docs, heading_stack, file_name, user_id)
+            self._visit(nested, docs, heading_stack, file_name, session_id)
 
     def _visit_list_item(
         self,
@@ -222,7 +260,7 @@ class SemanticChunker:
         docs: list[Document],
         heading_stack: list[str],
         file_name: str,
-        user_id: str,
+        session_id: str,
     ) -> None:
         """
         Handles a stand-alone "list item" node reached during generic
@@ -249,24 +287,20 @@ class SemanticChunker:
                     node,
                     heading_stack,
                     file_name,
-                    user_id,
+                    session_id,
                     override_text=item_text,
                 )
             )
 
         for nested in nested_nodes:
-            self._visit(nested, docs, heading_stack, file_name, user_id)
-
-    # ------------------------------------------------------------------
-    # Leaf-node helpers
-    # ------------------------------------------------------------------
+            self._visit(nested, docs, heading_stack, file_name, session_id)
 
     def _text_node_to_docs(
         self,
         node: dict,
         headings: list[str],
         file_name: str,
-        user_id: str,
+        session_id: str,
         override_text: str | None = None,
     ) -> list[Document]:
         text = override_text if override_text is not None else self._get_content(node)
@@ -278,10 +312,11 @@ class SemanticChunker:
         full_text = f"{prefix}\n\n{text}" if prefix else text
 
         raw_id = node.get("id")
-        chunk_id = self._make_chunk_id(user_id, file_name, raw_id)
+        chunk_id = self._make_chunk_id(session_id, file_name, raw_id)
         metadata: dict = {
             "custom_id": chunk_id,
-            "type": node.get("type"),
+            "session_id": session_id,
+            "type": node.get("type", "paragraph"),
             "page": node.get("page number"),
             "bbox": node.get("bounding box"),
             "file_name": file_name,
@@ -291,7 +326,7 @@ class SemanticChunker:
         raw_linked = node.get("linked content id")
         if raw_linked is not None:
             metadata["linked_content_id"] = self._make_chunk_id(
-                user_id, file_name, raw_linked
+                session_id, file_name, raw_linked
             )
 
         return self._split(full_text, metadata=metadata)
@@ -301,7 +336,7 @@ class SemanticChunker:
         node: dict,
         headings: list[str],
         file_name: str,
-        user_id: str,
+        session_id: str,
     ) -> list[Document]:
         rows_text: list[str] = []
 
@@ -324,31 +359,29 @@ class SemanticChunker:
             table_text = prefix + "\n\n" + table_text
 
         raw_id = node.get("id")
-        chunk_id = self._make_chunk_id(user_id, file_name, raw_id)
+        chunk_id = self._make_chunk_id(session_id, file_name, raw_id)
         metadata: dict = {
             "custom_id": chunk_id,
+            "session_id": session_id,
             "type": "table",
             "page": node.get("page number"),
             "bbox": node.get("bounding box"),
             "file_name": file_name,
-            "number_of_rows": node.get("number of rows"),
-            "number_of_columns": node.get("number of columns"),
         }
 
-        # Cross-page table continuation links
         if node.get("previous table id") is not None:
             metadata["previous_table_id"] = self._make_chunk_id(
-                user_id, file_name, node["previous table id"]
+                session_id, file_name, node["previous table id"]
             )
         if node.get("next table id") is not None:
             metadata["next_table_id"] = self._make_chunk_id(
-                user_id, file_name, node["next table id"]
+                session_id, file_name, node["next table id"]
             )
 
         raw_linked = node.get("linked content id")
         if raw_linked is not None:
             metadata["linked_content_id"] = self._make_chunk_id(
-                user_id, file_name, raw_linked
+                session_id, file_name, raw_linked
             )
 
         return [Document(page_content=table_text, metadata=metadata)]
@@ -358,32 +391,35 @@ class SemanticChunker:
         node: dict,
         headings: list[str],
         file_name: str,
-        user_id: str,
-    ) -> Document | None:
-        # "data"   = base64 URI  (when image_output="embedded")
-        # "source" = relative path to extracted image file
-        image_ref = node.get("data") or node.get("source") or ""
+        session_id: str,
+    ) -> Optional[Document]:
+        image_ref = node.get("data", None)
+        if not image_ref:
+            return None
 
         raw_id = node.get("id")
-        chunk_id = self._make_chunk_id(user_id, file_name, raw_id)
+        chunk_id = self._make_chunk_id(session_id, file_name, raw_id)
+
+        cloudinary_url = None
+        if cloudinary_client and cloudinary_client.is_configured and image_ref.startswith("data:image"):
+            cloudinary_url = cloudinary_client.upload_image_base64(image_ref, public_id=f"{session_id}_{chunk_id}")
 
         metadata: dict = {
             "custom_id": chunk_id,
+            "session_id": session_id,
             "type": "image",
             "page": node.get("page number"),
             "bbox": node.get("bounding box"),
             "file_name": file_name,
-            "format": node.get("format"),
+            "image_base64": image_ref,
+            "cloudinary_url": cloudinary_url,
         }
 
         raw_linked = node.get("linked content id")
         if raw_linked is not None:
             metadata["linked_content_id"] = self._make_chunk_id(
-                user_id, file_name, raw_linked
+                session_id, file_name, raw_linked
             )
-
-        if not image_ref:
-            return None
 
         return Document(page_content=image_ref, metadata=metadata)
 
@@ -414,14 +450,14 @@ class SemanticChunker:
         return (node.get("content") or node.get("text") or "").strip()
 
     @staticmethod
-    def _make_chunk_id(user_id: str, file_name: str, raw_id: Any) -> str:
+    def _make_chunk_id(session_id: str, file_name: str, raw_id: Any) -> str:
         raw_str = str(raw_id) if raw_id is not None else ""
-        if raw_str.startswith(f"{user_id}_"):
+        if raw_str.startswith(f"{session_id}_"):
             return raw_str
-        if user_id and file_name and raw_str:
-            return f"{user_id}_{file_name}_{raw_str}"
-        elif user_id and file_name:
-            return f"{user_id}_{file_name}"
+        if session_id and file_name and raw_str:
+            return f"{session_id}_{file_name}_{raw_str}"
+        elif session_id and file_name:
+            return f"{session_id}_{file_name}"
         return raw_str
 
     def _split(self, text: str, metadata: dict) -> list[Document]:
@@ -457,13 +493,7 @@ class SemanticChunker:
     # ------------------------------------------------------------------
 
     def _merge_small_paragraphs(self, docs: list[Document]) -> list[Document]:
-        """
-        Merge consecutive small text chunks on the same page into a single
-        chunk to avoid sending meaninglessly small fragments to the vector
-        store.  Applies to paragraph, list item, and text block types.
-        """
-        MERGEABLE_TYPES = {"paragraph", "list item", "text block"}
-
+        MERGEABLE_TYPES = {"paragraph", "list item", "text block", "transcript"}
         merged: list[Document] = []
         buffer: Document | None = None
 

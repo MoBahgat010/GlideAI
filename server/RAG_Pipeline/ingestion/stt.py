@@ -1,49 +1,26 @@
-"""
-Speech-to-text transformation for media ingestion.
-
-Uses Rev AI's asynchronous Speech-to-Text API through the official SDK and
-returns an OpenDataLoader-like JSON document so the existing chunking,
-embedding, and indexing path can stay shared with parsed documents.
-"""
-
-from rev_ai import JobStatus
 import json
 import logging
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Optional, Union, List
+from rev_ai import apiclient, JobStatus
 
 logger = logging.getLogger("ingestion.stt")
 
 MEDIA_EXTENSIONS = {
-    ".3gp",
-    ".aac",
-    ".aiff",
-    ".avi",
-    ".flac",
-    ".m4a",
-    ".m4v",
-    ".mkv",
-    ".mov",
-    ".mp3",
-    ".mp4",
-    ".mpeg",
-    ".mpg",
-    ".ogg",
-    ".opus",
-    ".wav",
-    ".webm",
-    ".wma",
-    ".wmv",
+    ".3gp", ".aac", ".aiff", ".avi", ".flac", ".m4a", ".m4v",
+    ".mkv", ".mov", ".mp3", ".mp4", ".mpeg", ".mpg", ".ogg",
+    ".opus", ".wav", ".webm", ".wma", ".wmv",
 }
 
 
-def is_media_file(path: str | Path) -> bool:
+def is_media_file(path: Union[str, Path]) -> bool:
     return Path(path).suffix.lower() in MEDIA_EXTENSIONS
 
 
 class RevAITranscriber:
-    """Transcribe local media files with Rev AI and emit chunker-compatible JSON."""
+    """Transcribes media files with Rev AI and emits chunker-compatible structured JSON."""
 
     def __init__(
         self,
@@ -62,22 +39,14 @@ class RevAITranscriber:
 
     def transcribe_to_json(self, file_path: str | Path) -> str:
         if not self.access_token:
-            raise EnvironmentError("Missing required env var: REV_AI")
-
-        try:
-            from rev_ai import apiclient
-        except ImportError as exc:
-            raise ImportError(
-                "Rev AI support requires the 'rev-ai' package. "
-                "Install requirements.txt or run: pip install rev-ai"
-            ) from exc
+            raise EnvironmentError("Missing required Rev AI access token.")
 
         media_path = Path(file_path)
         if not media_path.exists():
             raise FileNotFoundError(f"Media file not found: {media_path}")
 
         client = apiclient.RevAiAPIClient(self.access_token)
-        logger.info("Submitting %s to Rev AI for transcription", media_path)
+        logger.info("Submitting %s to Rev AI for transcription...", media_path.name)
         job = client.submit_job_local_file(str(media_path))
         job_id = self._field(job, "id")
         if not job_id:
@@ -89,11 +58,6 @@ class RevAITranscriber:
             transcript_json = json.loads(transcript_json)
 
         kids = self._transcript_to_elements(transcript_json)
-        if not kids:
-            logger.warning("Rev AI returned no transcript text for %s", media_path)
-
-        print("kids: ", kids)
-
         return json.dumps(
             {
                 "file name": media_path.name,
@@ -105,7 +69,6 @@ class RevAITranscriber:
         )
 
     def _normalize_status(self, raw_status) -> str:
-        """Rev AI may return a plain string or its own JobStatus enum — normalize either to a lowercase string value."""
         value = getattr(raw_status, "value", raw_status)
         return str(value).lower()
 
@@ -113,15 +76,15 @@ class RevAITranscriber:
         while True:
             details = client.get_job_details(job_id)
             status = self._normalize_status(self._field(details, "status", ""))
-            logger.info("Rev AI job %s status: %s", job_id, status)
+            logger.debug("Rev AI job %s status: %s", job_id, status)
 
             if status == JobStatus.TRANSCRIBED:
                 return
             if status == JobStatus.FAILED:
                 failure = self._field(details, "failure") or self._field(details, "failure_detail")
-                raise RuntimeError(f"Rev AI transcription job {job_id} {status}: {failure}")
+                raise RuntimeError(f"Rev AI transcription job {job_id} failed: {failure}")
 
-        time.sleep(self.poll_seconds)
+            time.sleep(self.poll_seconds)
 
     @staticmethod
     def _field(obj, name: str, default=None):
@@ -150,7 +113,7 @@ class RevAITranscriber:
                     "content": text,
                     "start_time": start_ts or 0.0,
                     "end_time": end_ts or start_ts or 0.0,
-                    "page number": 0,
+                    "page number": 1,
                 }
             )
             current_words = []

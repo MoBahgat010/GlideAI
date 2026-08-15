@@ -1,6 +1,6 @@
-from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
-from server.src.services.agent.middlewares.base_middleware import BaseMiddleware
+from langchain.agents.middleware import AgentMiddleware
+from .base_middleware import BaseMiddleware
 
 class ToolExceptionHandlerMiddleware(BaseMiddleware, AgentMiddleware):
     def wrap_tool_call(self, request, handler):

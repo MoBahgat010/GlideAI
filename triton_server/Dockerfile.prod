@@ -1,0 +1,12 @@
+FROM nvcr.io/nvidia/tritonserver:26.07-py3
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN python3 /app/scripts/download_models.py
+
+CMD ["tritonserver", "--model-repository=/models", "--log-verbose=1", "--allow-http=true", "--allow-grpc=true", "--allow-metrics=true", "--strict-model-config=false"]

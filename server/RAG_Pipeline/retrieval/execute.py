@@ -1,8 +1,9 @@
-from RAG_Pipeline.retrieval.pipeline import RetrievalPipeline
-from RAG_Pipeline.retrieval.reranker import HybridReranker
-from RAG_Pipeline.ingestion.embedding import MultimodalEncoder
-from RAG_Pipeline.storage.weaviate import WeaviateVDB
-from RAG_Pipeline.storage.vector_database import VDB
+from .pipeline import RetrievalPipeline
+from .reranker import HybridReranker
+from ..ingestion.embedding import MultimodalEncoder
+from ..storage.weaviate import WeaviateVDB
+from ..storage.vector_database import VDB
+
 from config import (
     TRITON_GRPC_URL,
     WEAVIATE_API_KEY,
@@ -10,10 +11,10 @@ from config import (
     INDEX_NAME,
     RETRIEVE_TOP_K,
     RERANK_TOP_K,
+    EMBEDDING_MODEL_D_MODEL,
 )
 
-# Direct Singleton Instances
-encoder = MultimodalEncoder(url=TRITON_GRPC_URL)
+encoder = MultimodalEncoder(url=TRITON_GRPC_URL, d_model=int(EMBEDDING_MODEL_D_MODEL))
 reranker = HybridReranker(url=TRITON_GRPC_URL)
 weaviate_strategy = WeaviateVDB(
     endpoint=WEAVIATE_REST_ENDPOINT,

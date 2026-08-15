@@ -1,6 +1,6 @@
 from typing import List
 from langchain.agents.middleware import AgentMiddleware
-from server.src.services.agent.middlewares.pii import CustomPIIMiddleware
+from .pii import CustomPIIMiddleware
 
 class BaseMiddleware(AgentMiddleware):
     registry: List[AgentMiddleware] = [

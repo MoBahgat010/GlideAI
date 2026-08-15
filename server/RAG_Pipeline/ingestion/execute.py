@@ -1,9 +1,10 @@
-from RAG_Pipeline.ingestion.pipeline import IngestionPipeline
-from RAG_Pipeline.ingestion.loader import PDFLoader
-from RAG_Pipeline.ingestion.embedding import MultimodalEncoder
-from RAG_Pipeline.ingestion.chunking import SemanticChunker
-from RAG_Pipeline.storage.vector_database import VDB
-from RAG_Pipeline.storage.weaviate import WeaviateVDB
+from .pipeline import IngestionPipeline
+from .loader import PDFLoader
+from .embedding import MultimodalEncoder
+from .chunking import SemanticChunker
+from ..storage.vector_database import VDB
+from ..storage.weaviate import WeaviateVDB
+
 from config import (
     WEAVIATE_API_KEY,
     WEAVIATE_REST_ENDPOINT,
@@ -15,8 +16,9 @@ from config import (
     EMBED_BATCH,
 )
 
+
 loader = PDFLoader()
-chunker = SemanticChunker(MAX_CHARS, OVERLAP_CHARS)
+chunker = SemanticChunker(max_chars=MAX_CHARS, overlap_chars=OVERLAP_CHARS)
 encoder = MultimodalEncoder(url=TRITON_GRPC_URL, d_model=int(EMBEDDING_MODEL_D_MODEL))
 
 vdb = VDB(

@@ -3,17 +3,27 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
+# Device
 DEVICE = os.getenv("DEVICE", "cuda")
 
+# Chunking
 MAX_CHARS = int(os.getenv("MAX_CHARS", "1000"))
 OVERLAP_CHARS = int(os.getenv("OVERLAP_CHARS", "200"))
 
+# Models
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "google/siglip-large-patch16-384")
 EMBEDDING_MODEL_D_MODEL = int(os.getenv("EMBEDDING_MODEL_D_MODEL", "768"))
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "jinaai/jina-reranker-m0")
 
+# Reranker
+EMBED_BATCH = int(os.getenv("EMBED_BATCH", "32"))
+RETRIEVE_TOP_K = int(os.getenv("RETRIEVE_TOP_K", "50"))
+RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "20"))
+
+# Index Name
 INDEX_NAME = os.getenv("INDEX_NAME", "personal-trials")
 
+# AI Provider
 BASE_URL = os.getenv("BASE_URL", "https://integrate.api.nvidia.com/v1")
 API_KEY = os.getenv("API_KEY", "")
 SUMMARIZER = os.getenv("SUMMARIZER", "openai/gpt-oss-120b")
@@ -21,32 +31,47 @@ TOKEN_THRESHOLD = int(os.getenv("TOKEN_THRESHOLD", "100000"))
 RUN_LIMIT = int(os.getenv("RUN_LIMIT", "30"))
 LVLM = os.getenv("LVLM", "nvidia/nemotron-3-ultra-550b-a55b")
 
+# HF_Token
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 
+# Redis
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6000/0")
 
-EMBED_BATCH = int(os.getenv("EMBED_BATCH", "32"))
-RETRIEVE_TOP_K = int(os.getenv("RETRIEVE_TOP_K", "50"))
-RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "20"))
-
+# AI Services
 REV_AI = os.getenv("REV_AI", "")
+
+# MCP Provider
 SMITHERY_API_KEY = os.getenv("SMITHERY_API_KEY", "")
 
+# Weaviate
 WEAVIATE_REST_ENDPOINT = os.getenv("WEAVIATE_REST_ENDPOINT", "")
 WEAVIATE_API_KEY = os.getenv("WEAVIATE_API_KEY", "")
 
+# Cloudinary
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME", "")
+CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY", "")
+CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET", "")
+CLOUDINARY_FOLDER = os.getenv("CLOUDINARY_FOLDER", "enterprise_rag_assets")
 
-# Temp ones
-CHUNKS_DIR = "test_uploads/chunks"
-UPLOAD_DIR = "test_uploads/final"
+# Feature Flags
+ENABLE_SEMANTIC_MEMORY = os.getenv("ENABLE_SEMANTIC_MEMORY", "true").lower() in ("true", "1", "yes")
+ENABLE_EPISODIC_MEMORY = os.getenv("ENABLE_EPISODIC_MEMORY", "true").lower() in ("true", "1", "yes")
+ENABLE_WORKING_MEMORY = os.getenv("ENABLE_WORKING_MEMORY", "true").lower() in ("true", "1", "yes")
 
-# ── MongoDB & JWT ──────────────────────────────────────────────────────────────
+# Storage Dirs
+CHUNKS_DIR = os.getenv("CHUNKS_DIR", "test_uploads/chunks")
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "test_uploads/final")
+
+# MongoDB
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
 MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "graphrag_db")
+
+# JWT
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "graphrag_super_secret_jwt_key_2026_change_in_production")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+JWT_REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 
-# ── Triton Inference Server ────────────────────────────────────────────────────
+# Triton
 TRITON_HTTP_URL = os.getenv("TRITON_HTTP_URL", "localhost:8000")
 TRITON_GRPC_URL = os.getenv("TRITON_GRPC_URL", "localhost:8001")

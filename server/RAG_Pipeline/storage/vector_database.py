@@ -18,8 +18,8 @@ class VDB:
     def upsert(self, chunks: list[Document], embeddings: list[list[float]]):
         return self.strategy.upsert(chunks=chunks, embeddings=embeddings)
 
-    def hybrid_query(self, query_text: str, vector: list[float], top_k: int, alpha: float) -> list[dict[str, Any]]:
-        return self.strategy.hybrid_query(query_text=query_text, vector=vector, top_k=top_k, alpha=alpha)
+    def hybrid_query(self, query_text: str, vector: list[float], top_k: int, alpha: float = 0.5, session_id: str = None) -> list[dict[str, Any]]:
+        return self.strategy.hybrid_query(query_text=query_text, vector=vector, top_k=top_k, alpha=alpha, session_id=session_id)
 
     def fetch_batch(self, ids: list[str]) -> list[dict[str, Any]]:
         return self.strategy.fetch_batch(ids=ids)
