@@ -23,9 +23,11 @@ async def receive_chunk(
     chunk_index: int = Form(...),
     total_chunks: int = Form(...),
     filename: str = Form(...),
-    session_id: Optional[str] = Form(None),
+    session_id: str = Form(...),
 ):
-    """Receive a single file slice and store it temporarily on disk."""
+    if not session_id:
+        raise HTTPException(400, "session_id is required")
+
     slot_dir = Path(CHUNKS_DIR) / upload_id
     await aiofiles.os.makedirs(str(slot_dir), exist_ok=True)
 
@@ -44,9 +46,12 @@ async def finalize_upload(
     upload_id: str = Form(...),
     filename: str = Form(...),
     total_chunks: int = Form(...),
-    session_id: Optional[str] = Form(None),
+    session_id: str = Form(...),
     user: Optional[dict] = Depends(get_optional_user),
 ):
+    if not session_id:
+        raise HTTPException(400, "session_id is required")
+
     slot_dir = Path(CHUNKS_DIR) / upload_id
     session_upload_dir = Path(UPLOAD_DIR) / session_id
     session_upload_dir.mkdir(parents=True, exist_ok=True)
@@ -65,7 +70,6 @@ async def finalize_upload(
     await asyncio.to_thread(shutil.rmtree, str(slot_dir), True)
     logger.info("Assembled %s (%d bytes) in session folder %s", final_path.name, final_path.stat().st_size, session_upload_dir)
 
-    # Ingest the session folder to process all uploaded PDF and media files in one pipeline run
     storage_key = str(session_upload_dir)
     job_id = upload_id
 

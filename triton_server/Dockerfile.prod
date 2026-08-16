@@ -7,6 +7,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+RUN echo "Executing download_models.py script to download models from Hugging Face Hub"
 RUN python3 /app/scripts/download_models.py
 
-CMD ["tritonserver", "--model-repository=/models", "--log-verbose=1", "--allow-http=true", "--allow-grpc=true", "--allow-metrics=true", "--strict-model-config=false"]
+ENV VRAM_QUOTA=8000
+
+RUN echo "Starting Triton Inference Server with VRAM quota of ${VRAM_QUOTA} MB"
+CMD [
+    "tritonserver",
+    "--model-repository=/models",
+    "--log-verbose=1",
+    "--allow-http=true",
+    "--allow-grpc=true",
+    "--allow-metrics=true",
+    "--strict-model-config=false"
+    "--rate-limit=execution_count",
+    "--rate-limit-resource=GPU_MEMORY:${VRAM_QUOTA:-}:0",
+]

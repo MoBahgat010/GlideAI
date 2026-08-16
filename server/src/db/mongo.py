@@ -2,13 +2,9 @@ import logging
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from config import MONGODB_URL, MONGODB_DB_NAME
 
-
 logger = logging.getLogger("server.db.mongo")
 
-
 class MongoManager:
-    """Async MongoDB Connection Manager."""
-
     client: AsyncIOMotorClient | None = None
     db: AsyncIOMotorDatabase | None = None
 
@@ -18,7 +14,6 @@ class MongoManager:
             logger.info("Connecting to MongoDB at %s", MONGODB_URL)
             cls.client = AsyncIOMotorClient(MONGODB_URL)
             cls.db = cls.client[MONGODB_DB_NAME]
-            # Ensure unique indexes
             try:
                 await cls.db.users.create_index("username", unique=True)
                 await cls.db.users.create_index("email", unique=True)
@@ -41,7 +36,6 @@ class MongoManager:
     @classmethod
     def get_db(cls) -> AsyncIOMotorDatabase:
         if cls.db is None:
-            # Fallback inline connection
             cls.client = AsyncIOMotorClient(MONGODB_URL)
             cls.db = cls.client[MONGODB_DB_NAME]
         return cls.db

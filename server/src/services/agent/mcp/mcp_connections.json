@@ -1,1 +1,14 @@
-{}
+{
+  "gmail": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@smithery/cli@latest",
+      "run",
+      "gmail",
+      "--config",
+      "{\"smitheryApiKey\":\"${SMITHERY_API_KEY}\"}"
+    ]
+  }
+}

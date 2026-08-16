@@ -54,9 +54,8 @@ CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET", "")
 CLOUDINARY_FOLDER = os.getenv("CLOUDINARY_FOLDER", "enterprise_rag_assets")
 
 # Feature Flags
-ENABLE_SEMANTIC_MEMORY = os.getenv("ENABLE_SEMANTIC_MEMORY", "true").lower() in ("true", "1", "yes")
-ENABLE_EPISODIC_MEMORY = os.getenv("ENABLE_EPISODIC_MEMORY", "true").lower() in ("true", "1", "yes")
-ENABLE_WORKING_MEMORY = os.getenv("ENABLE_WORKING_MEMORY", "true").lower() in ("true", "1", "yes")
+ENABLE_SEMANTIC_MEMORY = os.getenv("ENABLE_SEMANTIC_MEMORY", None)
+ENABLE_EPISODIC_MEMORY = os.getenv("ENABLE_EPISODIC_MEMORY", None)
 
 # Storage Dirs
 CHUNKS_DIR = os.getenv("CHUNKS_DIR", "test_uploads/chunks")

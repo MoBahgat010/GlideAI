@@ -34,6 +34,8 @@ class RetrievalPipeline:
         )
         top_results = self.reranker.rerank(query, candidates, self.rerank_top_k)
 
+        logger.info("Top results len: %s", len(top_results))
+
         await self._enrich_linked_content(top_results, candidates)
 
         return {
@@ -77,6 +79,6 @@ class RetrievalPipeline:
                     linked_obj = dict(linked)
                     if linked_obj.get("type") == "image":
                         r["linked_image"] = linked_obj.get("image_base64")
-                        if linked_obj.get("cloudinary_url"):
-                            r["linked_cloudinary_url"] = linked_obj.get("cloudinary_url")
+                        if linked_obj.get("file_url"):
+                            r["linked_file_url"] = linked_obj.get("file_url")
                     r["linked_content"] = linked_obj

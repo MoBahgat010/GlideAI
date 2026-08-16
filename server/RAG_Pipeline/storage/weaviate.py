@@ -1,3 +1,4 @@
+import atexit
 import logging
 from typing import Any, Optional
 import weaviate
@@ -31,6 +32,7 @@ class WeaviateVDB(VectorDatabaseStrategy):
             auth_credentials=Auth.api_key(api_key),
             additional_config=AdditionalConfig(timeout=Timeout(init=30, query=60, insert=120)),
         )
+        atexit.register(self.close)
 
         if not self.client.collections.exists(self.index):
             self.client.collections.create(
@@ -47,7 +49,7 @@ class WeaviateVDB(VectorDatabaseStrategy):
                     Property(name="end_time", data_type=DataType.NUMBER),
                     Property(name="bbox", data_type=DataType.NUMBER_ARRAY),
                     Property(name="image_base64", data_type=DataType.TEXT),
-                    Property(name="cloudinary_url", data_type=DataType.TEXT),
+                    Property(name="file_url", data_type=DataType.TEXT),
                     Property(name="linked_content_id", data_type=DataType.TEXT),
                 ],
             )
@@ -96,14 +98,12 @@ class WeaviateVDB(VectorDatabaseStrategy):
         if len(chunks) != len(embeddings):
             raise ValueError("Number of chunks and embeddings must match.")
 
-        logger.info("Upserting %d chunks into Weaviate collection '%s'...", len(chunks), self.index)
+            logger.info("Upserting %d chunks into Weaviate collection '%s'...", len(chunks), self.index)
 
         with self.collection.batch.fixed_size(batch_size=EMBED_BATCH, concurrent_requests=2) as batch:
             for chunk, embedding in zip(chunks, embeddings):
                 if isinstance(embedding, dict) and "embedding" in embedding:
                     embedding = embedding["embedding"]
-
-                logger.debug("Embedding dimensions: %s", len(embedding))
 
                 metadata = dict(chunk.metadata)
                 chunk_id = metadata.get("custom_id")
@@ -119,7 +119,7 @@ class WeaviateVDB(VectorDatabaseStrategy):
                     "end_time": metadata.get("end_time", None),
                     "bbox": metadata.get("bbox", None),
                     "image_base64": metadata.get("image_base64"),
-                    "cloudinary_url": metadata.get("cloudinary_url"),
+                    "file_url": metadata.get("file_url"),
                     "linked_content_id": metadata.get("linked_content_id", None),
                 }
                 properties = {k: v for k, v in properties.items() if v is not None}
@@ -186,3 +186,11 @@ class WeaviateVDB(VectorDatabaseStrategy):
             results.append(props)
 
         return results
+
+    def close(self):
+        """Gracefully close the Weaviate client connection."""
+        if hasattr(self, "client") and self.client:
+            try:
+                self.client.close()
+            except Exception:
+                pass

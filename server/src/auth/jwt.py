@@ -12,7 +12,7 @@ from config import (
     JWT_REFRESH_TOKEN_EXPIRE_DAYS,
 )
 
-from src.db.redis import redis_client
+from src.db.redis import RedisAuthUtils
 
 logger = logging.getLogger("server.auth.jwt")
 
@@ -62,12 +62,7 @@ async def create_refresh_token(user_id: str, username: str) -> Tuple[str, int]:
     encoded_jwt = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
     ttl_seconds = int(expires_delta.total_seconds())
-    try:
-        redis_key = f"refresh_token:{token_id}"
-        await redis_client.setex(redis_key, ttl_seconds, user_id)
-        await redis_client.sadd(f"user_refresh_tokens:{user_id}", token_id)
-    except Exception as exc:
-        logger.warning("Failed to store refresh token in Redis: %s", exc)
+    await RedisAuthUtils.store_refresh_token(user_id=str(user_id), token_id=token_id, ttl_seconds=ttl_seconds)
 
     return encoded_jwt, ttl_seconds
 
@@ -81,10 +76,9 @@ async def decode_access_token(token: str) -> Optional[dict]:
             return None
 
         jti = payload.get("jti")
-        if jti:
-            if await redis_client.get(f"blacklist:{jti}"):
-                logger.warning("Access token jti %s is blacklisted", jti)
-                return None
+        if jti and await RedisAuthUtils.is_token_blacklisted(jti):
+            logger.warning("Access token jti %s is blacklisted", jti)
+            return None
 
         return payload
     except Exception as exc:
@@ -105,16 +99,12 @@ async def verify_and_rotate_refresh_token(refresh_token: str) -> Optional[Tuple[
         if not token_id or not user_id or not username:
             return None
 
-        redis_key = f"refresh_token:{token_id}"
-        stored_user = await redis_client.get(redis_key)
-
+        stored_user = await RedisAuthUtils.get_refresh_token_user(token_id)
         if not stored_user or stored_user != user_id:
             logger.warning("Refresh token not found or invalidated in Redis: %s", token_id)
             return None
 
-        await redis_client.delete(redis_key)
-        await redis_client.srem(f"user_refresh_tokens:{user_id}", token_id)
-
+        await RedisAuthUtils.remove_refresh_token(user_id=user_id, token_id=token_id)
         new_refresh_token, _ = await create_refresh_token(user_id=user_id, username=username)
         return user_id, username, new_refresh_token
     except Exception as exc:
@@ -128,9 +118,7 @@ async def revoke_refresh_token(refresh_token: str) -> bool:
         token_id = payload.get("jti")
         user_id = payload.get("user_id")
         if token_id and user_id:
-            await redis_client.delete(f"refresh_token:{token_id}")
-            await redis_client.srem(f"user_refresh_tokens:{user_id}", token_id)
-            return True
+            return await RedisAuthUtils.remove_refresh_token(user_id=user_id, token_id=token_id)
     except Exception as exc:
         logger.warning("Revoke refresh token failed: %s", exc)
     return False
@@ -145,6 +133,6 @@ async def blacklist_access_token(access_token: str) -> None:
             now_ts = datetime.now(timezone.utc).timestamp()
             remaining_ttl = int(exp - now_ts)
             if remaining_ttl > 0:
-                await redis_client.setex(f"blacklist:{jti}", remaining_ttl, "revoked")
+                await RedisAuthUtils.blacklist_access_token(jti=jti, ttl_seconds=remaining_ttl)
     except Exception as exc:
         logger.debug("Failed to blacklist access token: %s", exc)

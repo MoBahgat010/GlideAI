@@ -4,23 +4,25 @@ from contextlib import asynccontextmanager
 import logging
 from urllib import request
 import os
-
 _SERVER_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _SERVER_DIR.parent
+_SRC_DIR = _SERVER_DIR / "src"
 
-for p in [str(_ROOT_DIR), str(_SERVER_DIR), str(_SERVER_DIR / "src")]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
+for p in [str(_ROOT_DIR), str(_SRC_DIR), str(_SERVER_DIR)]:
+    if p in sys.path:
+        sys.path.remove(p)
+    sys.path.insert(0, p)
 
+from RAG_Pipeline.ingestion.execute import vdb
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-from config import TRITON_HTTP_URL
+from config import TRITON_HTTP_URL, UPLOAD_DIR, CHUNKS_DIR
 
 from src.db.mongo import MongoManager
 from src.db.redis import close_redis
 from src.routers.auth import router as auth_router
-from src.routers.chat import router as chat_router
+from src.routers.chat import router as chat_router, agent_runner
 from src.routers.ingest import router as ingest_router
 from src.routers.sessions import router as sessions_router
 
@@ -60,11 +62,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("MongoDB connection setup during startup: %s", e)
 
+    logger.info("Initializing Agentic RAG and connecting to MCP servers on startup...")
+    try:
+        await agent_runner.init_agent()
+        loaded_tool_names = [getattr(t, "name", str(t)) for t in getattr(agent_runner, "all_tools", [])]
+        logger.info("Agentic RAG startup ready with %d tools: %s", len(loaded_tool_names), loaded_tool_names)
+    except Exception as e:
+        logger.error("Failed to initialize Agentic RAG on startup: %s", e)
+
     yield
 
     logger.info("Shutting down Enterprise RAG Platform...")
+    agent_runner.cleanup()
     await MongoManager.close()
     await close_redis()
+    vdb.close()
 
 
 app = FastAPI(
@@ -82,18 +94,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register routers
 app.include_router(auth_router)
 app.include_router(sessions_router)
 app.include_router(ingest_router)
 app.include_router(chat_router)
-
-# Mount uploaded document & media assets for direct page jump viewing
-from fastapi.staticfiles import StaticFiles
-from config import UPLOAD_DIR
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-app.mount("/api/files", StaticFiles(directory=UPLOAD_DIR), name="files")
-
 
 @app.get("/api/health")
 async def health():

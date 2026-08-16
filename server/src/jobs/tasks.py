@@ -1,13 +1,12 @@
 import logging
 import json
-from pathlib import Path
-import sys
 from urllib import request
 from celery import Celery
-import redis
 import pymongo
 from openai import OpenAI
 
+from langchain_core.messages import HumanMessage
+from src.db.redis import RedisManager, RedisSessionUtils
 from server.RAG_Pipeline.ingestion.execute import ingestion_pipeline
 from .extraction_pompt import EXTRACTION_PROMPT
 from config import (
@@ -22,11 +21,14 @@ from config import (
     ENABLE_EPISODIC_MEMORY,
 )
 
+import atexit
 logger = logging.getLogger("server.jobs.tasks")
 
-redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+redis_client = RedisManager.get_sync_client()
 mongo_client = pymongo.MongoClient(MONGODB_URL)
 db = mongo_client[MONGODB_DB_NAME]
+
+atexit.register(mongo_client.close)
 
 def check_triton_health(url: str) -> bool:
     health_url = f"{url}/v2/health/ready"
@@ -48,20 +50,14 @@ celery_app = Celery(
 
 
 @celery_app.task(name="run_ingestion", bind=True)
-def run_ingestion(self, job_id: str, storage_keys: str, session_id: str = "default") -> dict:
-    """Asynchronously process document & media files for a session and upsert to Weaviate with session filtering."""
+def run_ingestion(self, job_id: str, storage_keys: str, session_id: str) -> dict:
     logger.info("Starting ingestion task job_id=%s, path=%s, session_id=%s", job_id, storage_keys, session_id)
     self.update_state(
         state="PROGRESS",
-        meta={"stage": "PARSING", "message": "Parsing document layout & transcribing media via Rev AI...", "pct": 0.2},
+        meta={"stage": "PROCESSING", "message": "Processing and indexing documents...", "pct": 0.5},
     )
 
     try:
-        self.update_state(
-            state="PROGRESS",
-            meta={"stage": "PROCESSING", "message": "Semantic chunking & Cloudinary visual uploads...", "pct": 0.5},
-        )
-
         ingestion_pipeline.run_pipeline(storage_keys, session_id=session_id)
 
         self.update_state(
@@ -70,7 +66,12 @@ def run_ingestion(self, job_id: str, storage_keys: str, session_id: str = "defau
         )
 
         logger.info("Ingestion completed successfully for session_id=%s", session_id)
-        return {"job_id": job_id, "status": "completed", "path": storage_keys, "session_id": session_id}
+        return {
+            "job_id": job_id,
+            "status": "completed",
+            "path": storage_keys,
+            "session_id": session_id,
+        }
 
     except Exception as exc:
         logger.exception("Ingestion task failed for session_id=%s: %s", session_id, exc)
@@ -78,8 +79,7 @@ def run_ingestion(self, job_id: str, storage_keys: str, session_id: str = "defau
 
 
 @celery_app.task(name="extract_session_memory", bind=True)
-def extract_session_memory(self, session_id: str, user_id: str = "default") -> dict:
-    """Extract episodic events and semantic facts from session transcript based on feature flags."""
+def extract_session_memory(self, session_id: str, user_id: str) -> dict:
     logger.info("Starting memory extraction for session_id=%s (flags: semantic=%s, episodic=%s)", session_id, ENABLE_SEMANTIC_MEMORY, ENABLE_EPISODIC_MEMORY)
 
     if not ENABLE_SEMANTIC_MEMORY and not ENABLE_EPISODIC_MEMORY:
@@ -95,21 +95,33 @@ def extract_session_memory(self, session_id: str, user_id: str = "default") -> d
         meta={"stage": "FETCHING_HISTORY", "message": "Reading conversation transcript...", "pct": 0.2},
     )
 
-    key = f"session:{session_id}:working_memory"
-    raw_history = redis_client.get(key)
-    history = json.loads(raw_history) if raw_history else []
+    history_client = RedisSessionUtils.get_chat_history(session_id)
+    redis_messages = history_client.messages
+
+    history = []
+    if redis_messages:
+        for msg in redis_messages:
+            role = "USER" if isinstance(msg, HumanMessage) else "ASSISTANT"
+            history.append(f"{role}: {msg.content}")
+    else:
+        session_doc = db.sessions.find_one({"session_id": session_id})
+        if session_doc:
+            raw_messages = session_doc.get("messages") or session_doc.get("history") or []
+            for item in raw_messages:
+                role = item.get("role", "user").upper()
+                content = item.get("content", "")
+                if content:
+                    history.append(f"{role}: {content}")
 
     if not history:
-        logger.info("No history found in Redis for session_id=%s", session_id)
+        logger.info("No history found in Redis or MongoDB for session_id=%s", session_id)
         db.sessions.update_one(
             {"session_id": session_id},
             {"$set": {"status": "ended", "memory_extracted": False, "ended_at": pymongo.datetime.datetime.utcnow()}},
         )
         return {"session_id": session_id, "status": "no_history"}
 
-    formatted_transcript = "\n".join(
-        [f"{item.get('role', 'user').upper()}: {item.get('content', '')}" for item in history]
-    )
+    formatted_transcript = "\n".join(history)
 
     self.update_state(
         state="PROGRESS",

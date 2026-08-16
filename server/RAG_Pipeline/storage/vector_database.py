@@ -23,3 +23,7 @@ class VDB:
 
     def fetch_batch(self, ids: list[str]) -> list[dict[str, Any]]:
         return self.strategy.fetch_batch(ids=ids)
+
+    def close(self):
+        if hasattr(self.strategy, "close"):
+            self.strategy.close()

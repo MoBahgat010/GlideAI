@@ -20,7 +20,7 @@ services:
       - ./config.py:/app/config.py:ro
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
       - ../../.venv:/app/.venv:ro
-    command: sh -c "python3 scripts/download_models.py && tritonserver --model-repository=/models --log-verbose=1 --allow-http=true --allow-grpc=true --allow-metrics=true --strict-model-config=false --rate-limit=execution_count --rate-limit-resource=GPU_MEMORY:5500:0"
+    command: sh -c "python3 scripts/download_models.py && tritonserver --model-repository=/models --log-verbose=1 --allow-http=true --allow-grpc=true --allow-metrics=true --strict-model-config=false --rate-limit=execution_count --rate-limit-resource=GPU_MEMORY:${VRAM_QUOTA:-}:0"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
       interval: 10s

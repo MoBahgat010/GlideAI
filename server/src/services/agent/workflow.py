@@ -1,14 +1,10 @@
-import os
-import uuid
-import logging
 import datetime
-from typing import AsyncGenerator, Dict, Any, Optional
+import json
+import logging
+from typing import AsyncGenerator, Dict, Any, Optional, List
 
 from config import REDIS_URL
-
-from dotenv import load_dotenv
 from langchain.agents import create_agent
-from langchain_community.chat_message_histories import RedisChatMessageHistory
 from langgraph.graph.state import CompiledStateGraph
 
 from .models.orchestrator import orchestrator
@@ -16,6 +12,8 @@ from .system_prompt import SYSTEM_PROMPT
 from .middlewares.base_middleware import BaseMiddleware
 from .tools.base_tools import Tools
 from .mcp.base_mcp import get_mcp_tools, McpSessions
+from src.db.redis import RedisSessionUtils
+from src.models.schemas import ChunkMetadata
 
 logger = logging.getLogger("agent.workflow")
 
@@ -29,49 +27,41 @@ class AgenticRAG:
         self.recursion_limit = recursion_limit
         self.redis_url = redis_url
 
-        self.mcp_session: McpSessions = None
-        self.agent: CompiledStateGraph = None
+        self.mcp_session: Optional[McpSessions] = None
+        self.all_tools: list = []
+        self.agent: Optional[CompiledStateGraph] = None
 
     async def init_agent(self) -> CompiledStateGraph:
         if self.agent is not None:
             return self.agent
 
         mcp_tools, self.mcp_session = await get_mcp_tools()
-        all_tools = Tools.registry + mcp_tools
-
-        logger.info("Initializing Agentic RAG graph with %d tools and %d middlewares (Redis backend: %s)", len(all_tools), len(self.middleware), self.redis_url)
+        self.all_tools = Tools.registry + mcp_tools
+        tool_names = [getattr(t, "name", str(t)) for t in self.all_tools]
+        
+        logger.info("Initializing Agentic RAG with %d tools: %s", len(self.all_tools), tool_names)
         self.agent = create_agent(
             model=self.orchestrator,
             system_prompt=self.system_prompt,
-            tools=all_tools,
+            tools=self.all_tools,
             middleware=self.middleware,
         )
         return self.agent
 
-    def get_redis_history(self, session_id: str) -> RedisChatMessageHistory:
-        return RedisChatMessageHistory(
-            session_id=f"session:{session_id}:working_memory",
-            url=self.redis_url,
-            ttl=7 * 86400,
-        )
-
     async def astream_response(self, user_message: str, session_id: Optional[str] = None) -> AsyncGenerator[Dict[str, Any], None]:
         await self.init_agent()
 
-        active_thread_id = session_id or str(uuid.uuid4())
         config = {
-            "configurable": {"thread_id": active_thread_id},
+            "configurable": {"thread_id": session_id},
             "recursion_limit": self.recursion_limit,
         }
 
-        # Load session history from LangChain Redis storage
-        history_client = self.get_redis_history(active_thread_id)
+        history_client = RedisSessionUtils.get_chat_history(session_id, url=self.redis_url)
         past_msgs = history_client.messages
 
         messages_input = list(past_msgs) + [{"role": "user", "content": user_message}]
         input_payload = {"messages": messages_input}
 
-        logger.info("Executing Agentic RAG for session_id=%s with %d prior messages from Redis", active_thread_id, len(past_msgs))
         collected_tokens = []
 
         async for event in self.agent.astream_events(input_payload, config=config, version="v2"):
@@ -97,7 +87,7 @@ class AgenticRAG:
                 tool_name = event.get("name", "tool")
                 tool_output = event.get("data", {}).get("output", "")
                 if hasattr(tool_output, "content"):
-                    out_text = tool_output.content
+                    out_text = str(tool_output.content)
                 elif isinstance(tool_output, list):
                     out_text = "\n".join(str(x) for x in tool_output)
                 else:
@@ -110,7 +100,7 @@ class AgenticRAG:
                 }
 
                 if tool_name == "rag_retrieval" and "--- Result" in out_text:
-                    citations = []
+                    citations: List[dict] = []
                     chunks_raw = out_text.split("--- Result ")
                     for cr in chunks_raw:
                         if not cr.strip():
@@ -129,15 +119,35 @@ class AgenticRAG:
                                 c_dict["custom_id"] = line.split(":", 1)[1].strip()
                             elif line.startswith("File Name:"):
                                 c_dict["file_name"] = line.split(":", 1)[1].strip()
+                            elif line.startswith("File URL:"):
+                                f_url = line.split(":", 1)[1].strip()
+                                if f_url and f_url != "None":
+                                    c_dict["file_url"] = f_url
+                                    c_dict["url"] = f_url
                             elif line.startswith("Page:"):
                                 try:
                                     c_dict["page"] = int(line.split(":", 1)[1].strip())
                                 except Exception:
                                     pass
                             elif line.startswith("Time:"):
-                                c_dict["time_range"] = line.split(":", 1)[1].strip()
+                                time_str = line.split(":", 1)[1].strip()
+                                c_dict["time_range"] = time_str
+                                try:
+                                    parts = time_str.replace("s", "").split("-")
+                                    if len(parts) == 2:
+                                        c_dict["start_time"] = float(parts[0].strip())
+                                        c_dict["end_time"] = float(parts[1].strip())
+                                except Exception:
+                                    pass
                             elif line.startswith("BBox:"):
-                                c_dict["bbox"] = line.split(":", 1)[1].strip()
+                                raw_bbox = line.split(":", 1)[1].strip()
+                                try:
+                                    c_dict["bbox"] = json.loads(raw_bbox)
+                                except Exception:
+                                    try:
+                                        c_dict["bbox"] = [float(x.strip()) for x in raw_bbox.strip("[]").split(",") if x.strip()]
+                                    except Exception:
+                                        c_dict["bbox"] = None
                             elif line.startswith("Type:"):
                                 c_dict["type"] = line.split(":", 1)[1].strip()
                             elif line.startswith("Rerank Score:"):
@@ -151,11 +161,18 @@ class AgenticRAG:
                         if c_dict.get("file_name"):
                             if "index" not in c_dict:
                                 c_dict["index"] = len(citations) + 1
-                            citations.append(c_dict)
+                            if not c_dict.get("url"):
+                                c_dict["url"] = c_dict.get("file_url")
+
+                            try:
+                                pydantic_cite = ChunkMetadata(**c_dict)
+                                citations.append(pydantic_cite.model_dump())
+                            except Exception:
+                                citations.append(c_dict)
+
                     if citations:
                         yield {"type": "sources", "citations": citations}
 
-        # Persist conversation turn to LangChain Redis history
         try:
             history_client.add_user_message(user_message)
             if collected_tokens:

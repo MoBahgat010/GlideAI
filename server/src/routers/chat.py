@@ -23,10 +23,15 @@ async def ask_session(
 
     async def event_stream():
         logger.info("Starting Agentic RAG streaming for user=%s session=%s", current_user.get("username"), session_id)
-        async for event in agent_runner.astream_response(user_message=query, session_id=session_id):
-            payload = json.dumps(event)
-            yield f"data: {payload}\n\n"
-
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        try:
+            async for event in agent_runner.astream_response(user_message=query, session_id=session_id):
+                payload = json.dumps(event)
+                yield f"data: {payload}\n\n"
+        except Exception as exc:
+            logger.exception("Error during chat stream for session %s: %s", session_id, exc)
+            err_msg = f"Agent execution error: {str(exc)}"
+            yield f"data: {json.dumps({'type': 'error', 'content': err_msg})}\n\n"
+        finally:
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

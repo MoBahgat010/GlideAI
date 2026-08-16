@@ -1,6 +1,7 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Any
 from pydantic import BaseModel, Field
+
 
 class UserRegister(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
@@ -17,7 +18,7 @@ class Token(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
-    expires_in: int = 900  # 15 minutes in seconds
+    expires_in: int = 900
     username: str
     user_id: str
 
@@ -37,6 +38,15 @@ class UserResponse(BaseModel):
     created_at: Optional[datetime] = None
 
 
+class FileMetadata(BaseModel):
+    filename: str
+    size: int = 0
+    file_type: str = "document"
+    file_url: Optional[str] = None
+    url: Optional[str] = None
+    uploaded_at: Optional[datetime] = None
+
+
 class SessionCreate(BaseModel):
     title: str = Field(default="New RAG Session", description="Title of the conversation session")
 
@@ -48,6 +58,7 @@ class SessionResponse(BaseModel):
     status: str
     created_at: datetime
     memory_extracted: bool = False
+    files: Optional[List[FileMetadata]] = []
 
 
 class SessionEndResponse(BaseModel):
@@ -57,16 +68,39 @@ class SessionEndResponse(BaseModel):
     message: str
 
 
-class Citation(BaseModel):
-    custom_id: str
+class ChunkMetadata(BaseModel):
+    index: Optional[int] = None
+    custom_id: Optional[str] = None
     file_name: Optional[str] = None
     page: Optional[int] = None
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
     bbox: Optional[List[float]] = None
     type: Optional[str] = "text"
     score: Optional[float] = None
     text: Optional[str] = None
     image_url: Optional[str] = None
-    cloudinary_url: Optional[str] = None
+    file_url: Optional[str] = None
+    url: Optional[str] = None
+
+
+class Citation(ChunkMetadata):
+    pass
+
+
+class AnswerWithCitations(BaseModel):
+    answer: str
+    citations: List[ChunkMetadata] = []
+
+
+class AgentAnswersResponse(BaseModel):
+    session_id: str
+    query: str
+    answers: List[AnswerWithCitations] = []
+
+
+class GenerateTitleRequest(BaseModel):
+    prompt: str
 
 
 class AskRequest(BaseModel):

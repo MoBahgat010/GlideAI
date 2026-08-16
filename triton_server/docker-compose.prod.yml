@@ -7,8 +7,9 @@ services:
     container_name: enterprise-rag-triton-prod
     runtime: nvidia
     env_file:
-      - ./.env
+      - .env
     environment:
+      - VRAM_QUOTA=${VRAM_QUOTA:-8000}
       - NVIDIA_VISIBLE_DEVICES=all
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
     ports:
