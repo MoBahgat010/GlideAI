@@ -269,11 +269,3 @@ Enterprise_RAG/
 | `GET` | `/api/ingest/status/{task_id}` | Poll Celery ingestion job progress |
 | `GET` | `/api/auth/google/login` | Initiate Google OAuth flow |
 | `GET` | `/api/gmail/messages` | Search and preview user Gmail emails |
-
----
-
-## License & Notices
-
-- **Application Code**: Licensed under the MIT License.
-- **NVIDIA Triton Inference Server**: Subject to upstream NVIDIA software license agreements.
-- **Third-Party Libraries**: Subject to their respective Apache 2.0, MIT, and BSD licenses.
