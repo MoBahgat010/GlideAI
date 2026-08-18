@@ -1,9 +1,15 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import 'highlight.js/styles/github-dark.css'
 import './App.css'
+import LandingPage from './pages/LandingPage'
+import AuthPage from './pages/AuthPage'
+import SessionsPage from './pages/SessionsPage'
+import GmailStatusBar from './components/GmailStatusBar'
+import HiTLBanner from './components/HiTLBanner'
+import MemoriesModal from './components/MemoriesModal'
 
 // ── Constants & Helpers ────────────────────────────────────────────────────────
 const CHUNK_SIZE = 1024 * 1024 // 1 MB
@@ -870,6 +876,8 @@ function ChatWorkspace({
   onCreateSession,
   onEndSession,
   onViewMemories,
+  onHiTLRequired,
+  resumeStream,
 }) {
   const [query, setQuery] = useState('')
   const [messages, setMessages] = useState([])
@@ -878,6 +886,59 @@ function ChatWorkspace({
   const [selectedCitation, setSelectedCitation] = useState(null)
   const [sessionFiles, setSessionFiles] = useState([])
   const abortRef = useRef(null)
+
+  useEffect(() => {
+    if (!resumeStream) return
+    let active = true
+    const readResumeStream = async () => {
+      try {
+        setStreaming(true)
+        const reader = resumeStream.body.getReader()
+        const decoder = new TextDecoder()
+        let buf = ''
+        while (active) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          const parts = buf.split('\n\n')
+          buf = parts.pop()
+          for (const part of parts) {
+            if (!part.startsWith('data:')) continue
+            try {
+              const msg = JSON.parse(part.slice(5).trim())
+              if (msg.type === 'token') {
+                setMessages(prev => {
+                  const lastIdx = prev.length - 1
+                  if (lastIdx < 0) return prev
+                  return prev.map((m, i) => i !== lastIdx ? m : {
+                    ...m,
+                    content: m.content + msg.content,
+                    isReasoning: false,
+                  })
+                })
+              } else if (msg.type === 'error') {
+                setMessages(prev => {
+                  const lastIdx = prev.length - 1
+                  if (lastIdx < 0) return prev
+                  return prev.map((m, i) => i !== lastIdx ? m : {
+                    ...m,
+                    content: m.content + `\n\n**Error:** ${msg.content}`,
+                    isReasoning: false,
+                  })
+                })
+              }
+            } catch { }
+          }
+        }
+      } catch (err) {
+        console.error('Error reading resume stream:', err)
+      } finally {
+        setStreaming(false)
+      }
+    }
+    readResumeStream()
+    return () => { active = false }
+  }, [resumeStream])
 
   const loadSessionDetails = useCallback(async () => {
     if (!activeSessionId) {
@@ -1058,6 +1119,12 @@ function ChatWorkspace({
                 ...m,
                 citations: msg.citations || [],
               }))
+            } else if (msg.type === 'approval_required') {
+              setMessages(prev => prev.map(m => m.id !== assistantId ? m : {
+                ...m,
+                isReasoning: false,
+              }))
+              onHiTLRequired && onHiTLRequired(msg)
             } else if (msg.type === 'error') {
               setMessages(prev => prev.map(m => m.id !== assistantId ? m : {
                 ...m,
@@ -1646,229 +1713,20 @@ function AuthModal({ isOpen, onClose, onAuthSuccess }) {
   )
 }
 
-// ── Memories Modal ─────────────────────────────────────────────────────────────
-function MemoriesModal({ isOpen, onClose, memoryData }) {
-  if (!isOpen || !memoryData) return null
-
-  const episodic = memoryData.episodic_memory || {}
-  const semantic = memoryData.semantic_memory || {}
-  const flags = memoryData.feature_flags || { enable_semantic_memory: true, enable_episodic_memory: true }
-
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-dialog glass" onClick={e => e.stopPropagation()}>
-        <div className="modal-head">
-          <div className="modal-title">🧠 Extracted Contextual Memory Profile</div>
-          <button className="modal-close-btn" onClick={onClose}>✕</button>
-        </div>
-
-        <div className="modal-body">
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-            <span className="status-pill" style={{ background: flags.enable_episodic_memory ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255,255,255,0.05)', color: flags.enable_episodic_memory ? 'var(--accent-emerald)' : 'var(--text-muted)' }}>
-              Episodic Memory: {flags.enable_episodic_memory ? 'ENABLED' : 'DISABLED'}
-            </span>
-            <span className="status-pill" style={{ background: flags.enable_semantic_memory ? 'rgba(6, 182, 212, 0.15)' : 'rgba(255,255,255,0.05)', color: flags.enable_semantic_memory ? 'var(--accent-cyan)' : 'var(--text-muted)' }}>
-              Semantic Memory: {flags.enable_semantic_memory ? 'ENABLED' : 'DISABLED'}
-            </span>
-          </div>
-
-          <div>
-            <h4 style={{ fontSize: 14, color: 'var(--accent-secondary)', marginBottom: 8 }}>📖 Episodic Summary & Key Events</h4>
-            <div style={{ background: 'var(--bg-tertiary)', padding: 14, borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)', fontSize: 13.5 }}>
-              <p style={{ marginBottom: 10 }}><strong>Summary:</strong> {episodic.summary || 'No episodic summary extracted for this session yet.'}</p>
-              {episodic.key_events && episodic.key_events.length > 0 && (
-                <div>
-                  <strong>Key Milestones:</strong>
-                  <ul style={{ paddingLeft: 20, marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    {episodic.key_events.map((ev, i) => <li key={i}>{ev}</li>)}
-                  </ul>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div>
-            <h4 style={{ fontSize: 14, color: 'var(--accent-cyan)', marginBottom: 8 }}>💡 Learned Semantic Facts & Preferences</h4>
-            <div style={{ background: 'var(--bg-tertiary)', padding: 14, borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)', fontSize: 13.5 }}>
-              {semantic.facts && semantic.facts.length > 0 ? (
-                <div style={{ marginBottom: 10 }}>
-                  <strong>Extracted Knowledge:</strong>
-                  <ul style={{ paddingLeft: 20, marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    {semantic.facts.map((fact, i) => <li key={i}>{fact}</li>)}
-                  </ul>
-                </div>
-              ) : (
-                <p style={{ color: 'var(--text-muted)' }}>No semantic facts extracted yet.</p>
-              )}
-
-              {semantic.preferences && semantic.preferences.length > 0 && (
-                <div style={{ marginTop: 8 }}>
-                  <strong>User Preferences:</strong>
-                  <ul style={{ paddingLeft: 20, marginTop: 4 }}>
-                    {semantic.preferences.map((pref, i) => <li key={i}>{pref}</li>)}
-                  </ul>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ── Landing Page Component ────────────────────────────────────────────────────
-function LandingPage({ onExploreWorkspace }) {
-  return (
-    <div className="landing-page">
-      <section className="hero-section">
-        <div className="hero-badge">
-          <span>🚀 Enterprise Multi-Modal Agentic GraphRAG</span>
-          <span>•</span>
-          <span style={{ color: 'var(--accent-emerald)' }}>Production Grade</span>
-        </div>
-
-        <h1 className="hero-title">
-          Autonomous Reasoning over <br />
-          <span className="gradient-text">Enterprise Multi-Modal Knowledge</span>
-        </h1>
-
-        <p className="hero-subtitle">
-          Next-generation GraphRAG platform powered by <strong>NVIDIA Triton GPU acceleration</strong>, PDF visual layout understanding with bounding box spotlights, Rev AI audio/video transcription, Jina cross-encoder reranking, and self-evolving contextual memory.
-        </p>
-
-        <div className="hero-cta">
-          <button className="btn btn-gradient" style={{ padding: '14px 28px', fontSize: 16 }} onClick={onExploreWorkspace}>
-            Launch AI Workspace →
-          </button>
-          <a href="#architecture" className="btn btn-ghost" style={{ padding: '14px 28px', fontSize: 16 }}>
-            Explore Architecture
-          </a>
-        </div>
-
-        <div className="hero-metrics">
-          <div className="metric-card glass">
-            <div className="metric-value">&lt; 450ms</div>
-            <div className="metric-label">Hybrid Search Latency</div>
-          </div>
-          <div className="metric-card glass">
-            <div className="metric-value">99.4%</div>
-            <div className="metric-label">Grounding Precision</div>
-          </div>
-          <div className="metric-card glass">
-            <div className="metric-value">15m / 7d</div>
-            <div className="metric-label">Token Security & Isolation</div>
-          </div>
-          <div className="metric-card glass">
-            <div className="metric-value">100%</div>
-            <div className="metric-label">Multi-Modal BBox Accuracy</div>
-          </div>
-        </div>
-      </section>
-
-      {/* Interactive Architecture Section */}
-      <section id="architecture" className="section-container">
-        <div className="section-header">
-          <div className="section-tag">System Architecture</div>
-          <h2 className="section-title">End-to-End Enterprise Retrieval Pipeline</h2>
-          <p className="section-desc">
-            Distributed microservices architecture scaling independently across Triton, FastAPI, Celery, Redis, and Weaviate.
-          </p>
-        </div>
-
-        <div className="pipeline-flow">
-          <div className="pipeline-node active">
-            <div className="pipeline-node-icon">📥</div>
-            <div className="pipeline-node-title">1. Document Slicer</div>
-            <div className="pipeline-node-sub">1MB Chunk Slices</div>
-          </div>
-          <div className="pipeline-arrow">➔</div>
-          <div className="pipeline-node">
-            <div className="pipeline-node-icon">📑</div>
-            <div className="pipeline-node-title">2. OpenDataLoader + Rev AI</div>
-            <div className="pipeline-node-sub">PDF BBox & Media STT</div>
-          </div>
-          <div className="pipeline-arrow">➔</div>
-          <div className="pipeline-node">
-            <div className="pipeline-node-icon">⚡</div>
-            <div className="pipeline-node-title">3. Triton GPU</div>
-            <div className="pipeline-node-sub">SigLIP Bi-Encoder</div>
-          </div>
-          <div className="pipeline-arrow">➔</div>
-          <div className="pipeline-node">
-            <div className="pipeline-node-icon">🗄️</div>
-            <div className="pipeline-node-title">4. Weaviate VDB</div>
-            <div className="pipeline-node-sub">Session Hybrid Search</div>
-          </div>
-          <div className="pipeline-arrow">➔</div>
-          <div className="pipeline-node">
-            <div className="pipeline-node-icon">🎯</div>
-            <div className="pipeline-node-title">5. Cross-Encoder</div>
-            <div className="pipeline-node-sub">Jina Reranker</div>
-          </div>
-          <div className="pipeline-arrow">➔</div>
-          <div className="pipeline-node">
-            <div className="pipeline-node-icon">🤖</div>
-            <div className="pipeline-node-title">6. LangGraph Agent</div>
-            <div className="pipeline-node-sub">Redis Working Memory</div>
-          </div>
-        </div>
-      </section>
-
-      {/* Features Grid */}
-      <section className="section-container">
-        <div className="section-header">
-          <div className="section-tag">Enterprise Capabilities</div>
-          <h2 className="section-title">Built for Mission-Critical Accuracy</h2>
-        </div>
-
-        <div className="features-grid">
-          <div className="feature-card glass">
-            <div className="feature-icon">🔍</div>
-            <h3 className="feature-title">Multi-Modal BBox & Media Localization</h3>
-            <p className="feature-desc">
-              Preserves exact spatial coordinates for tables, figures, headings, and speech audio timestamps with Rev AI integration and glowing chunk highlights.
-            </p>
-          </div>
-
-          <div className="feature-card glass">
-            <div className="feature-icon">⚡</div>
-            <h3 className="feature-title">Triton GPU Microservice</h3>
-            <p className="feature-desc">
-              High-throughput gRPC inference utilizing Google SigLIP multimodal vision-language embeddings and Jina AI cross-encoder rerankers with rate-limiting.
-            </p>
-          </div>
-
-          <div className="feature-card glass">
-            <div className="feature-icon">🧠</div>
-            <h3 className="feature-title">Episodic & Semantic Memory Engine</h3>
-            <p className="feature-desc">
-              Asynchronous Celery workers synthesize conversational milestones into structured episodic summaries and persistent semantic facts.
-            </p>
-          </div>
-
-          <div className="feature-card glass">
-            <div className="feature-icon">🛡️</div>
-            <h3 className="feature-title">Session-Level Isolation & JWT Rotation</h3>
-            <p className="feature-desc">
-              15-minute access tokens paired with 7-day Redis-backed refresh tokens featuring automatic token rotation and session-level Weaviate query filtering.
-            </p>
-          </div>
-        </div>
-      </section>
-    </div>
-  )
-}
-
 // ── Main App Root ─────────────────────────────────────────────────────────────
 export default function App() {
-  const [view, setView] = useState('workspace')
+  const [view, setView] = useState(() => {
+    const savedToken = localStorage.getItem('graphrag_access_token')
+    return savedToken ? 'workspace' : 'auth'
+  })
   const [token, setToken] = useState(() => localStorage.getItem('graphrag_access_token') || '')
   const [refreshToken, setRefreshToken] = useState(() => localStorage.getItem('graphrag_refresh_token') || '')
   const [username, setUsername] = useState(() => localStorage.getItem('graphrag_username') || '')
-  const [authModalOpen, setAuthModalOpen] = useState(false)
   const [memoryModalOpen, setMemoryModalOpen] = useState(false)
   const [memoryData, setMemoryData] = useState(null)
+  // HiTL state: holds the pending approval_required event payload
+  const [hitlPending, setHitlPending] = useState(null)
+  const [resumeStream, setResumeStream] = useState(null)
 
   const [sessions, setSessions] = useState([])
   const [activeSessionId, setActiveSessionId] = useState(() => localStorage.getItem('graphrag_active_session') || '')
@@ -1889,7 +1747,7 @@ export default function App() {
       setToken('')
       setRefreshToken('')
       setUsername('')
-      setAuthModalOpen(true)
+      setView('auth')
     }
     window.addEventListener('auth_token_refreshed', onRefreshed)
     window.addEventListener('auth_logout', onLogout)
@@ -2041,6 +1899,12 @@ export default function App() {
 
   const activeSessionObj = sessions.find(s => (s.id || s.session_id) === activeSessionId) || { session_id: activeSessionId, id: activeSessionId, title: 'Active Session' }
 
+  // HiTL: handle approval resolved — resume streaming
+  const handleHiTLResolved = (resumeResponse) => {
+    setHitlPending(null)
+    setResumeStream(resumeResponse)
+  }
+
   return (
     <div className="app">
       <header className="header">
@@ -2087,13 +1951,14 @@ export default function App() {
 
           {token ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <GmailStatusBar token={token} />
               <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>👤 {username}</span>
               <button className="btn btn-ghost" style={{ padding: '6px 12px', fontSize: 12.5 }} onClick={handleLogout}>
                 Sign Out
               </button>
             </div>
           ) : (
-            <button className="btn btn-gradient" style={{ padding: '7px 16px', fontSize: 13 }} onClick={() => setAuthModalOpen(true)}>
+            <button className="btn btn-gradient" style={{ padding: '7px 16px', fontSize: 13 }} onClick={() => setView('auth')}>
               Sign In / Register
             </button>
           )}
@@ -2101,26 +1966,50 @@ export default function App() {
       </header>
 
       <main style={{ flex: 1 }}>
+        {view === 'auth' && (
+          <AuthPage
+            onAuthSuccess={({ token: acc, username: uname }) => {
+              setToken(acc)
+              setUsername(localStorage.getItem('graphrag_username') || uname)
+              setView('workspace')
+              loadSessions()
+            }}
+          />
+        )}
+
         {view === 'landing' && (
           <LandingPage onExploreWorkspace={() => setView('workspace')} />
         )}
 
         {view === 'workspace' && (
-          <ChatWorkspace
-            token={token}
-            activeSessionId={activeSessionId}
-            activeSession={activeSessionObj}
-            sessions={sessions}
-            onSessionTitleUpdated={handleSessionTitleUpdated}
-            onSessionChange={selectSession}
-            onCreateSession={handleCreateSession}
-            onEndSession={handleEndSession}
-            onViewMemories={handleViewMemories}
-          />
+          <>
+            {hitlPending && (
+              <HiTLBanner
+                sessionId={activeSessionId}
+                actionRequests={hitlPending.action_requests}
+                reviewConfigs={hitlPending.review_configs}
+                token={token}
+                onResolved={handleHiTLResolved}
+              />
+            )}
+            <ChatWorkspace
+              token={token}
+              activeSessionId={activeSessionId}
+              activeSession={activeSessionObj}
+              sessions={sessions}
+              onSessionTitleUpdated={handleSessionTitleUpdated}
+              onSessionChange={selectSession}
+              onCreateSession={handleCreateSession}
+              onEndSession={handleEndSession}
+              onViewMemories={handleViewMemories}
+              onHiTLRequired={setHitlPending}
+              resumeStream={resumeStream}
+            />
+          </>
         )}
 
         {view === 'history' && (
-          <SessionsHistoryView
+          <SessionsPage
             sessions={sessions}
             activeSessionId={activeSessionId}
             onSelectSession={(sessId) => {
@@ -2141,19 +2030,6 @@ export default function App() {
           />
         )}
       </main>
-
-      <AuthModal
-        isOpen={authModalOpen}
-        onClose={() => setAuthModalOpen(false)}
-        onAuthSuccess={(acc, ref, uname) => {
-          setToken(acc)
-          setRefreshToken(ref)
-          setUsername(uname)
-          setView('workspace')
-          setAuthModalOpen(false)
-          loadSessions(acc)
-        }}
-      />
 
       <MemoriesModal
         isOpen={memoryModalOpen}

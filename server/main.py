@@ -25,6 +25,9 @@ from src.routers.auth import router as auth_router
 from src.routers.chat import router as chat_router, agent_runner
 from src.routers.ingest import router as ingest_router
 from src.routers.sessions import router as sessions_router
+from src.routers.google_auth import router as google_auth_router
+from src.routers.gmail import router as gmail_router
+from src.interrupts.router import router as hitl_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,18 +65,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("MongoDB connection setup during startup: %s", e)
 
-    logger.info("Initializing Agentic RAG and connecting to MCP servers on startup...")
-    try:
-        await agent_runner.init_agent()
-        loaded_tool_names = [getattr(t, "name", str(t)) for t in getattr(agent_runner, "all_tools", [])]
-        logger.info("Agentic RAG startup ready with %d tools: %s", len(loaded_tool_names), loaded_tool_names)
-    except Exception as e:
-        logger.error("Failed to initialize Agentic RAG on startup: %s", e)
-
     yield
 
     logger.info("Shutting down Enterprise RAG Platform...")
-    agent_runner.cleanup()
     await MongoManager.close()
     await close_redis()
     vdb.close()
@@ -95,6 +89,9 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(google_auth_router)
+app.include_router(gmail_router)
+app.include_router(hitl_router)
 app.include_router(sessions_router)
 app.include_router(ingest_router)
 app.include_router(chat_router)

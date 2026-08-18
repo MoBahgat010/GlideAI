@@ -5,8 +5,7 @@ from celery import Celery
 import pymongo
 from openai import OpenAI
 
-from langchain_core.messages import HumanMessage
-from src.db.redis import RedisManager, RedisSessionUtils
+from src.db.redis import RedisManager
 from server.RAG_Pipeline.ingestion.execute import ingestion_pipeline
 from .extraction_pompt import EXTRACTION_PROMPT
 from config import (
@@ -95,23 +94,15 @@ def extract_session_memory(self, session_id: str, user_id: str) -> dict:
         meta={"stage": "FETCHING_HISTORY", "message": "Reading conversation transcript...", "pct": 0.2},
     )
 
-    history_client = RedisSessionUtils.get_chat_history(session_id)
-    redis_messages = history_client.messages
-
+    session_doc = db.sessions.find_one({"session_id": session_id})
     history = []
-    if redis_messages:
-        for msg in redis_messages:
-            role = "USER" if isinstance(msg, HumanMessage) else "ASSISTANT"
-            history.append(f"{role}: {msg.content}")
-    else:
-        session_doc = db.sessions.find_one({"session_id": session_id})
-        if session_doc:
-            raw_messages = session_doc.get("messages") or session_doc.get("history") or []
-            for item in raw_messages:
-                role = item.get("role", "user").upper()
-                content = item.get("content", "")
-                if content:
-                    history.append(f"{role}: {content}")
+    if session_doc:
+        raw_messages = session_doc.get("messages") or session_doc.get("history") or []
+        for item in raw_messages:
+            role = item.get("role", "user").upper()
+            content = item.get("content", "")
+            if content:
+                history.append(f"{role}: {content}")
 
     if not history:
         logger.info("No history found in Redis or MongoDB for session_id=%s", session_id)

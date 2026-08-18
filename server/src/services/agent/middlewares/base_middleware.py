@@ -4,7 +4,7 @@ from .pii import CustomPIIMiddleware
 
 class BaseMiddleware(AgentMiddleware):
     registry: List[AgentMiddleware] = [
-        CustomPIIMiddleware("email", strategy="redact"),
+        # CustomPIIMiddleware("email", strategy="redact"),
         CustomPIIMiddleware("credit_card", strategy="redact"),
         CustomPIIMiddleware("ip", strategy="redact"),
         CustomPIIMiddleware("mac_address", strategy="redact"),

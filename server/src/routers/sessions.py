@@ -19,7 +19,6 @@ from config import (
 
 from src.auth.dependencies import get_current_user
 from src.db.mongo import get_database
-from src.db.redis import RedisSessionUtils
 from src.models.schemas import (
     SessionCreate,
     SessionEndResponse,
@@ -72,6 +71,7 @@ async def create_session(
         "created_at": now,
         "memory_extracted": False,
         "files": [],
+        "messages": [],
     }
     await db.sessions.insert_one(session_doc)
     logger.info("Created new session %s for user %s", session_id, current_user["username"])
@@ -125,46 +125,22 @@ async def get_session(
     if not session:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found or access denied.")
 
-    history_client = RedisSessionUtils.get_chat_history(session_id)
-
-    redis_messages = history_client.messages
-
+    # Retrieve conversation history purely from MongoDB by conversation ID (session_id)
+    raw_messages = session.get("messages") or session.get("history") or []
     formatted_messages = []
+    for m in raw_messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        ts = m.get("timestamp")
+        if isinstance(ts, datetime):
+            ts = ts.isoformat()
 
-    if len(redis_messages) == 0:
-        raw_messages = session.get("messages") or session.get("history") or []
-        for m in raw_messages:
-            role = m.get("role", "user")
-            content = m.get("content", "")
-            ts = m.get("timestamp")
-            if isinstance(ts, datetime):
-                ts = ts.isoformat()
-
-            formatted_messages.append({
-                "role": role,
-                "content": content,
-                "citations": m.get("citations", []),
-                "timestamp": ts,
-            })
-
-            if role == "user":
-                history_client.add_user_message(content)
-            elif role in ("assistant", "ai"):
-                history_client.add_ai_message(content)
-
-        if formatted_messages:
-            logger.info(
-                "Cold start hydration: seeded %d messages from MongoDB into Redis for session %s",
-                len(formatted_messages),
-                session_id,
-            )
-    else:
-        for msg in redis_messages:
-            role = "user" if isinstance(msg, HumanMessage) else "assistant"
-            formatted_messages.append({
-                "role": role,
-                "content": msg.content,
-            })
+        formatted_messages.append({
+            "role": role,
+            "content": content,
+            "citations": m.get("citations", []),
+            "timestamp": ts,
+        })
 
     files = _extract_session_files(session, session_id)
 
@@ -198,8 +174,6 @@ async def delete_session(
     await db.sessions.delete_one({"session_id": session_id})
     await db.episodic_memories.delete_many({"session_id": session_id})
     await db.semantic_memories.delete_many({"session_id": session_id})
-
-    await RedisSessionUtils.delete_session_memory(session_id)
 
     session_dir = Path(UPLOAD_DIR) / session_id
     if session_dir.exists():

@@ -152,8 +152,7 @@ class RedisSessionUtils:
     @staticmethod
     def get_session_storage_key(session_id: Optional[str]) -> str:
         """Format consistent Redis key for session working memory."""
-        sid = session_id or "default"
-        return f"session:{sid}:working_memory"
+        return f"session:{session_id}:working_memory"
 
     @classmethod
     def get_chat_history(
@@ -201,8 +200,6 @@ class RedisSessionUtils:
 
 
 class RedisCacheUtils:
-    """Generic JSON caching and helper operations."""
-
     @staticmethod
     async def get_json(key: str) -> Optional[Any]:
         """Fetch and deserialize a JSON value."""

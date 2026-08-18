@@ -132,3 +132,46 @@ class MemoryStatusResponse(BaseModel):
     enable_working: bool
     episodic_memory: Optional[dict] = None
     semantic_memory: Optional[dict] = None
+
+
+class GoogleServiceStatus(BaseModel):
+    connected: bool
+    email: Optional[str] = None
+
+
+class GmailMessageSummary(BaseModel):
+    id: str
+    subject: Optional[str] = None
+    sender: Optional[str] = None
+    date: Optional[str] = None
+    snippet: Optional[str] = None
+    is_unread: bool = False
+
+
+class GmailMessageDetail(GmailMessageSummary):
+    body_text: Optional[str] = None
+    to: Optional[str] = None
+
+
+class SendEmailRequest(BaseModel):
+    to: str
+    subject: str
+    body: str
+    reply_to_message_id: Optional[str] = None
+
+
+class CreateDraftRequest(BaseModel):
+    to: str
+    subject: str
+    body: str
+
+
+class HiTLDecision(BaseModel):
+    type: str                              # approve | edit | reject | respond
+    message: Optional[str] = None         # for reject / respond
+    edited_action: Optional[dict] = None  # for edit: {name, args}
+
+
+class HiTLResumeRequest(BaseModel):
+    decisions: List[HiTLDecision]
+

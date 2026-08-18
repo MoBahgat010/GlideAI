@@ -6,46 +6,24 @@ from fastapi import APIRouter, Depends, HTTPException, Header, status
 from fastapi.security import OAuth2PasswordRequestForm
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-try:
-    from src.auth.dependencies import get_current_user
-    from src.auth.jwt import (
-        create_access_token,
-        create_refresh_token,
-        verify_and_rotate_refresh_token,
-        revoke_refresh_token,
-        blacklist_access_token,
-        hash_password,
-        verify_password,
-    )
-    from src.db.mongo import get_database
-    from src.models.schemas import (
-        Token,
-        UserLogin,
-        UserRegister,
-        UserResponse,
-        RefreshTokenRequest,
-        LogoutRequest,
-    )
-except ImportError:
-    from ..auth.dependencies import get_current_user
-    from ..auth.jwt import (
-        create_access_token,
-        create_refresh_token,
-        verify_and_rotate_refresh_token,
-        revoke_refresh_token,
-        blacklist_access_token,
-        hash_password,
-        verify_password,
-    )
-    from ..db.mongo import get_database
-    from ..models.schemas import (
-        Token,
-        UserLogin,
-        UserRegister,
-        UserResponse,
-        RefreshTokenRequest,
-        LogoutRequest,
-    )
+from src.auth.dependencies import get_current_user
+from src.auth.jwt import (
+    create_access_token,
+    create_refresh_token,
+    verify_and_rotate_refresh_token,
+    revoke_refresh_token,
+    blacklist_access_token,
+    hash_password,
+    verify_password,
+)
+from src.db.mongo import get_database
+from src.models.schemas import (
+    Token,
+    UserRegister,
+    UserResponse,
+    RefreshTokenRequest,
+    LogoutRequest,
+)
 
 logger = logging.getLogger("server.routers.auth")
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])

@@ -57,8 +57,8 @@ ENABLE_EPISODIC_MEMORY = os.getenv("ENABLE_EPISODIC_MEMORY", None)
 CHUNKS_DIR = os.getenv("CHUNKS_DIR", "test_uploads/chunks")
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "test_uploads/final")
 
-MONGODB_URL = os.getenv("MONGODB_URL")
-MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "graphrag_db")
+MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "enterprise-rag")
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM")
@@ -67,3 +67,28 @@ JWT_REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS"))
 
 TRITON_HTTP_URL = os.getenv("TRITON_HTTP_URL")
 TRITON_GRPC_URL = os.getenv("TRITON_GRPC_URL")
+
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID")
+GOOGLE_AUTH_URI = os.getenv("GOOGLE_AUTH_URI")
+GOOGLE_TOKEN_URI = os.getenv("GOOGLE_TOKEN_URI")
+GOOGLE_AUTH_PROVIDER_X509_CERT_URL = os.getenv("GOOGLE_AUTH_PROVIDER_X509_CERT_URL")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
+GMAIL_REDIRECT_URI = os.getenv("GMAIL_REDIRECT_URI")
+FRONTEND_URL = os.getenv("FRONTEND_URL")
+
+NEON_POSTGRES_URI = os.getenv("NEON_POSTGRES_URI")
+
+GMAIL_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.drafts.create",
+    "https://www.googleapis.com/auth/gmail.settings.sharing",
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/calendar.events",
+]

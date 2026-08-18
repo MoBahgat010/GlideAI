@@ -6,4 +6,5 @@ orchestrator = ChatOpenAI(
     base_url=BASE_URL,
     api_key=API_KEY,
     top_p=0.3,
+    max_retries=3,
 )

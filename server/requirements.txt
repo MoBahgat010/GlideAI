@@ -27,3 +27,7 @@ pillow>=10.4.0
 requests>=2.32.0
 langchain-opendataloader-pdf>=0.1.0
 rev-ai>=2.18.0
+google-auth>=2.29.0
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.130.0
+httpx>=0.27.0
