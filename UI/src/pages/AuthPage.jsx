@@ -5,13 +5,17 @@ import React, { useState, useEffect } from 'react'
  * On mount, reads the URL hash for OAuth callback params (#access_token=...&refresh_token=...&username=...)
  * and auto-logs the user in if found.
  */
-export default function AuthPage({ onAuthSuccess }) {
-  const [tab, setTab] = useState('login')   // 'login' | 'register'
+export default function AuthPage({ onAuthSuccess, initialTab = 'login' }) {
+  const [tab, setTab] = useState(initialTab || 'login')   // 'login' | 'register'
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [email, setEmail] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (initialTab) setTab(initialTab)
+  }, [initialTab])
 
   // Handle Google OAuth callback: tokens arrive in the URL hash
   useEffect(() => {

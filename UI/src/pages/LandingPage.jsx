@@ -1,6 +1,6 @@
 import React from 'react'
 
-export default function LandingPage({ onExploreWorkspace }) {
+export default function LandingPage({ onExploreWorkspace, isLoggedIn }) {
   return (
     <div className="landing-page">
       <section className="hero-section">
@@ -21,7 +21,7 @@ export default function LandingPage({ onExploreWorkspace }) {
 
         <div className="hero-cta">
           <button className="btn btn-gradient" style={{ padding: '14px 28px', fontSize: 16 }} onClick={onExploreWorkspace}>
-            Launch AI Workspace →
+            {isLoggedIn ? 'Go to My Sessions →' : 'Get Started →'}
           </button>
           <a href="#architecture" className="btn btn-ghost" style={{ padding: '14px 28px', fontSize: 16 }}>
             Explore Architecture
@@ -120,10 +120,10 @@ export default function LandingPage({ onExploreWorkspace }) {
           </div>
 
           <div className="feature-card glass">
-            <div className="feature-icon">🧠</div>
-            <h3 className="feature-title">Episodic &amp; Semantic Memory Engine</h3>
+            <div className="feature-icon">🤖</div>
+            <h3 className="feature-title">Agentic Workflows &amp; Tool Ecosystem</h3>
             <p className="feature-desc">
-              Asynchronous Celery workers synthesize conversational milestones into structured episodic summaries and persistent semantic facts.
+              LangGraph-powered stateful agents with dynamic ToolRuntime context, Gmail integration, and human-in-the-loop governance.
             </p>
           </div>
 

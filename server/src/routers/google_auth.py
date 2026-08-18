@@ -19,7 +19,7 @@ from config import (
     GMAIL_SCOPES,
 )
 from src.auth.jwt import create_access_token, create_refresh_token
-from src.db.mongo import MongoManager
+from src.db.mongo import mongo
 from src.db.redis import RedisManager
 
 logger = logging.getLogger("server.routers.google_auth")
@@ -69,7 +69,6 @@ async def google_callback(code: str, state: str):
     await redis.delete(state_key)
 
     # Exchange authorization code for tokens directly with Google token endpoint
-    token_url = GOOGLE_TOKEN_URI or "https://oauth2.googleapis.com/token"
     token_data = {
         "client_id": GOOGLE_CLIENT_ID,
         "client_secret": GOOGLE_CLIENT_SECRET,
@@ -79,7 +78,7 @@ async def google_callback(code: str, state: str):
     }
 
     async with httpx.AsyncClient() as client:
-        token_resp = await client.post(token_url, data=token_data)
+        token_resp = await client.post(GOOGLE_TOKEN_URI, data=token_data)
         if token_resp.status_code != 200:
             logger.error("Google token exchange failed: status=%s body=%s", token_resp.status_code, token_resp.text)
             raise HTTPException(
@@ -144,8 +143,7 @@ async def google_callback(code: str, state: str):
         }
 
     # Upsert user in MongoDB
-    db = MongoManager.get_db()
-    user = await db.users.find_one({"google_id": google_id})
+    user = mongo.users.find_one({"google_id": google_id})
 
     if user:
         user_id = str(user["_id"])
@@ -155,11 +153,11 @@ async def google_callback(code: str, state: str):
             if not token_doc.get("refresh_token") and user.get("gmail_tokens"):
                 token_doc["refresh_token"] = user["gmail_tokens"].get("refresh_token")
             update_fields["gmail_tokens"] = token_doc
-        await db.users.update_one({"_id": user["_id"]}, {"$set": update_fields})
+        mongo.users.update_one({"_id": user["_id"]}, {"$set": update_fields})
     else:
         # Link by matching email if account already exists
         if email:
-            user = await db.users.find_one({"email": email.lower()})
+            user = mongo.users.find_one({"email": email.lower()})
         if user:
             user_id = str(user["_id"])
             username = str(user["username"])
@@ -168,18 +166,18 @@ async def google_callback(code: str, state: str):
                 if not token_doc.get("refresh_token") and user.get("gmail_tokens"):
                     token_doc["refresh_token"] = user["gmail_tokens"].get("refresh_token")
                 update_fields["gmail_tokens"] = token_doc
-            await db.users.update_one({"_id": user["_id"]}, {"$set": update_fields})
+            mongo.users.update_one({"_id": user["_id"]}, {"$set": update_fields})
         else:
             # Create a brand new user
             user_id = str(uuid.uuid4())
             base_uname = name.replace(" ", "_").lower()[:30]
             username = base_uname
-            existing = await db.users.find_one({"username": username})
+            existing = mongo.users.find_one({"username": username})
             if existing:
                 username = f"{base_uname}_{uuid.uuid4().hex[:6]}"
 
             now = datetime.now(timezone.utc)
-            await db.users.insert_one({
+            mongo.users.insert_one({
                 "_id": user_id,
                 "username": username,
                 "email": email.lower() if email else "",

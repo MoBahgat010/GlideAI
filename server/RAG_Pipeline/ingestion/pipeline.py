@@ -8,12 +8,13 @@ from datetime import datetime, timezone
 import pymongo
 from langchain_core.documents import Document
 
-from config import EMBED_BATCH, REV_AI, MONGODB_URL, MONGODB_DB_NAME
+from src.db.mongo import mongo
+from config import EMBED_BATCH, REV_AI
 from .chunking import SemanticChunker
 from .embedding import MultimodalEncoder
 from .loader import PDFLoader
 from .stt import RevAITranscriber, is_media_file
-from ..storage.vector_database import VDB
+from ..storage.weaviate import WeaviateVDB
 from ..storage.cloudinary_storage import cloudinary_client
 
 logger = logging.getLogger("ingestion.pipeline")
@@ -25,7 +26,7 @@ class IngestionPipeline:
         loader: PDFLoader,
         chunker: SemanticChunker,
         encoder: MultimodalEncoder,
-        vdb: VDB,
+        vdb: WeaviateVDB,
         batch_size: int = EMBED_BATCH,
     ):
         self.loader = loader
@@ -34,9 +35,7 @@ class IngestionPipeline:
         self.vdb = vdb
         self.batch_size = batch_size
 
-        self.mongo_client = pymongo.MongoClient(MONGODB_URL)
-        self.db = self.mongo_client[MONGODB_DB_NAME]
-        atexit.register(self.mongo_client.close)
+        self.db = mongo.sync_db
         self.transcriber = RevAITranscriber(access_token=REV_AI)
         logger.info("IngestionPipeline initialized with batch_size=%d", self.batch_size)
 

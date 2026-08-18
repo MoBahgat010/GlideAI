@@ -9,7 +9,6 @@ import AuthPage from './pages/AuthPage'
 import SessionsPage from './pages/SessionsPage'
 import GmailStatusBar from './components/GmailStatusBar'
 import HiTLBanner from './components/HiTLBanner'
-import MemoriesModal from './components/MemoriesModal'
 
 // ── Constants & Helpers ────────────────────────────────────────────────────────
 const CHUNK_SIZE = 1024 * 1024 // 1 MB
@@ -154,10 +153,11 @@ function BBoxModal({ isOpen, onClose, citation, activeSessionId }) {
   const isMedia = fileName.toLowerCase().match(/\.(mp4|webm|mp3|wav|ogg|mov|mkv|aac|flac)$/) || isTranscript
   const sessionId = citation.session_id || activeSessionId || 'default'
 
-  // Direct Cloudinary file_url
-  const baseFileUrl = citation.file_url || citation.url || ''
-  const pageJumpUrl = `${baseFileUrl}#page=${currentPage}`
-  const timeJumpUrl = `${baseFileUrl}#t=${startTime || 0}`
+  // Direct Cloudinary file_url or local endpoint fallback
+  const rawFileUrl = citation.file_url || citation.url || ''
+  const baseFileUrl = rawFileUrl || (sessionId && fileName ? `/api/sessions/${sessionId}/files/${encodeURIComponent(fileName)}` : '')
+  const pageJumpUrl = baseFileUrl ? `${baseFileUrl}#page=${currentPage}` : ''
+  const timeJumpUrl = baseFileUrl ? `${baseFileUrl}#t=${startTime || 0}` : ''
 
   // Precise BBox Coordinate Mapping (Standard PDF Points: ~595 x 842 pt A4 / 612 x 792 pt Letter)
   const [rawX0 = 0, rawY0 = 0, rawX1 = 535, rawY1 = 533] = Array.isArray(bbox) ? bbox : [0, 0, 535, 533]
@@ -375,8 +375,9 @@ function CitationPill({ num, cite, activeSessionId, onOpenBBox }) {
   const page = cite.page || 1
   const isTranscript = cite.type === 'transcript' || cite.start_time != null
   const text = cite.text || cite.chunk_text || 'Referenced grounding passage from enterprise knowledge base.'
-  const hasFileUrl = Boolean(cite.file_url || cite.url)
-  const fileUrl = cite.file_url || cite.url
+  const rawUrl = cite.file_url || cite.url
+  const fileUrl = rawUrl || (activeSessionId && fileName ? `/api/sessions/${activeSessionId}/files/${encodeURIComponent(fileName)}` : '')
+  const hasFileUrl = Boolean(fileUrl)
 
   const handleMouseEnter = () => {
     if (hideTimerRef.current) {
@@ -513,7 +514,7 @@ function processCitationText(children, citations, onCitationClick, activeSession
   if (children === null || children === undefined) return children
 
   if (typeof children === 'string') {
-    const citationRegex = /(\[\d+(?:\s*,\s*\d+)*\]|\[(?:Doc|Media|Page|Citation)[^\]]*\])/g
+    const citationRegex = /(\[\d+(?:\s*,\s*\d+)*\]|\[(?:Doc|Media|Page|Citation|Source|Result)[^\]]*\])/gi
     const parts = children.split(citationRegex)
     if (parts.length === 1) return children
 
@@ -527,12 +528,27 @@ function processCitationText(children, citations, onCitationClick, activeSession
         const validPills = rawNums
           .map(n => {
             const citeIndex = parseInt(n, 10)
-            const cite = citations?.find(c => c.index === citeIndex) || (citations && citations[citeIndex - 1])
+            const cite = citations?.find(c => Number(c.index) === citeIndex) || (citations && citations[citeIndex - 1])
             return { num: n, cite }
           })
           .filter(item => item.cite != null)
 
         if (validPills.length === 0) {
+          if (citations && citations.length > 0) {
+            const firstNum = parseInt(rawNums[0], 10) || 1
+            const fallbackCite = citations[Math.min(firstNum - 1, citations.length - 1)] || citations[0]
+            return (
+              <span key={`pill-group-${idx}`} className="citation-group-inline">
+                <CitationPill
+                  key={`cite-pill-${idx}-fb`}
+                  num={rawNums[0] || '1'}
+                  cite={fallbackCite}
+                  activeSessionId={activeSessionId}
+                  onOpenBBox={onCitationClick}
+                />
+              </span>
+            )
+          }
           return part
         }
 
@@ -551,19 +567,30 @@ function processCitationText(children, citations, onCitationClick, activeSession
         )
       }
 
-      // Match [Doc: file.pdf | Page: 2]
+      // Match [Doc: file.pdf | Page: 2] or [Result 1] or [Source 1]
       if (part.startsWith('[') && part.endsWith(']')) {
         const citeText = part.slice(1, -1).trim()
+        const numInText = citeText.match(/\b(\d+)\b/)
+        const citeIndex = numInText ? parseInt(numInText[1], 10) : 1
+        const matchedCite = citations?.find(c => Number(c.index) === citeIndex) || (citations && citations[citeIndex - 1])
+
         const pageMatch = citeText.match(/Page:\s*(\d+)/i) || citeText.match(/p\.\s*(\d+)/i)
-        const pageNum = pageMatch ? pageMatch[1] : null
+        const pageNum = pageMatch ? parseInt(pageMatch[1], 10) : (matchedCite?.page || 1)
         const fileMatch = citeText.match(/(?:Doc|Media):\s*([^\s\|]+)/i)
-        const fileName = fileMatch ? fileMatch[1] : null
+        const fileName = fileMatch ? fileMatch[1] : (matchedCite?.file_name || matchedCite?.filename || citeText)
 
         return (
           <span
             key={`pill-doc-${idx}`}
             className="citation-pill citation-pill-inline"
-            onClick={() => onCitationClick && onCitationClick({ file_name: fileName || citeText, page: pageNum ? parseInt(pageNum, 10) : 1, text: `Reference: ${citeText}` })}
+            onClick={() => onCitationClick && onCitationClick({
+              file_name: fileName,
+              page: pageNum,
+              text: matchedCite?.text || `Reference: ${citeText}`,
+              bbox: matchedCite?.bbox,
+              file_url: matchedCite?.file_url || matchedCite?.url,
+              session_id: activeSessionId,
+            })}
             title="Click to inspect chunk in document"
           >
             🔍 {citeText}
@@ -875,7 +902,6 @@ function ChatWorkspace({
   onSessionChange,
   onCreateSession,
   onEndSession,
-  onViewMemories,
   onHiTLRequired,
   resumeStream,
 }) {
@@ -914,6 +940,15 @@ function ChatWorkspace({
                     ...m,
                     content: m.content + msg.content,
                     isReasoning: false,
+                  })
+                })
+              } else if (msg.type === 'sources') {
+                setMessages(prev => {
+                  const lastIdx = prev.length - 1
+                  if (lastIdx < 0) return prev
+                  return prev.map((m, i) => i !== lastIdx ? m : {
+                    ...m,
+                    citations: msg.citations || [],
                   })
                 })
               } else if (msg.type === 'error') {
@@ -1099,6 +1134,36 @@ function ChatWorkspace({
                 content: m.content + msg.content,
                 isReasoning: false,
               }))
+            } else if (msg.type === 'update') {
+              const data = msg.data || {}
+              if (data.tools && Array.isArray(data.tools.messages)) {
+                for (const toolMsg of data.tools.messages) {
+                  const toolName = toolMsg.name || 'tool'
+                  const content = toolMsg.content
+                  if (toolName === 'rag_retrieval') {
+                    try {
+                      const parsed = typeof content === 'object' ? content : JSON.parse(content)
+                      if (parsed && Array.isArray(parsed.chunks)) {
+                        setMessages(prev => prev.map(m => m.id !== assistantId ? m : {
+                          ...m,
+                          citations: parsed.chunks,
+                          steps: [...m.steps, `Retrieved ${parsed.chunks.length} document passage(s)`],
+                        }))
+                      }
+                    } catch {
+                      setMessages(prev => prev.map(m => m.id !== assistantId ? m : {
+                        ...m,
+                        steps: [...m.steps, `Executed Tool: ${toolName}`],
+                      }))
+                    }
+                  } else {
+                    setMessages(prev => prev.map(m => m.id !== assistantId ? m : {
+                      ...m,
+                      steps: [...m.steps, `Executed Tool: ${toolName}`],
+                    }))
+                  }
+                }
+              }
             } else if (msg.type === 'step') {
               setMessages(prev => prev.map(m => m.id !== assistantId ? m : {
                 ...m,
@@ -1189,9 +1254,6 @@ function ChatWorkspace({
             <button className="btn btn-ghost" style={{ padding: '5px 12px', fontSize: 12.5 }} onClick={onCreateSession}>
               + New Session
             </button>
-            <button className="btn btn-ghost" style={{ padding: '5px 12px', fontSize: 12.5 }} onClick={onViewMemories}>
-              🧠 Memories
-            </button>
             <button className="btn btn-ghost" style={{ padding: '5px 12px', fontSize: 12.5, color: 'var(--accent-rose)' }} onClick={onEndSession}>
               ⏹ End
             </button>
@@ -1256,27 +1318,32 @@ function ChatWorkspace({
                 </div>
               )}
 
-              {/* Source Document Citations Section at Bottom of Message */}
-              {m.citations && m.citations.length > 0 && (
+              {/* Grounded Sources Footer Section */}
+              {m.role === 'assistant' && m.citations && m.citations.length > 0 && (
                 <div className="citations-section">
-                  <div className="citations-label">Source Document Citations (Click to view in document):</div>
+                  <div className="citations-label">
+                    <span>📚 Grounded Sources ({m.citations.length})</span>
+                  </div>
                   <div className="citations-grid">
-                    {m.citations.map((c, i) => {
+                    {m.citations.map((c, cIdx) => {
+                      const cNum = c.index || cIdx + 1
+                      const cName = c.file_name || c.filename || 'Source Document'
                       const isTrans = c.type === 'transcript' || c.start_time != null
                       return (
                         <div
-                          key={c.custom_id || i}
-                          className="citation-pill citation-card-bottom"
+                          key={`c-card-${m.id || idx}-${cIdx}`}
+                          className="citation-card-bottom glass"
                           onClick={() => setSelectedCitation({ ...c, session_id: activeSessionId })}
-                          title={`Click to view in document (Page ${c.page || 1})`}
+                          style={{ cursor: 'pointer' }}
                         >
-                          <span className="citation-badge">[{c.index || (i + 1)}]</span>
-                          <span className="citation-doc-name">{isTrans ? '🎬' : '📄'} {c.file_name}</span>
-                          <span style={{ color: 'var(--accent-cyan)' }}>
-                            {isTrans ? `⏱ ${c.start_time?.toFixed(1)}s` : `p. ${c.page || 1}`}
-                          </span>
-                          {c.score != null && <span style={{ color: 'var(--accent-emerald)', fontSize: 11 }}>{(c.score).toFixed(2)}</span>}
-                          <span className="citation-view-action">📄 View in Document</span>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span className="citation-badge">[{cNum}]</span>
+                            <span className="citation-doc-name" title={cName}>{cName}</span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-muted)' }}>
+                            <span>{isTrans ? `⏱ ${c.start_time?.toFixed(1) || 0}s` : `p. ${c.page || 1}`}</span>
+                            <span className="citation-view-action">Inspect ↗</span>
+                          </div>
                         </div>
                       )
                     })}
@@ -1323,419 +1390,111 @@ function ChatWorkspace({
   )
 }
 
-// ── Sessions History Tab View ─────────────────────────────────────────────────
-function SessionsHistoryView({ sessions, activeSessionId, onSelectSession, onCreateSession, onDeleteSession }) {
-  return (
-    <div className="sessions-history-container">
-      <div className="sessions-history-header">
-        <div>
-          <h2 className="sessions-history-title">🗂 Conversation Sessions History</h2>
-          <p className="sessions-history-desc">
-            All your conversations stored in MongoDB. Click any session to continue the chat with its isolated documents and memory.
-          </p>
-        </div>
-        <button className="btn btn-gradient" onClick={onCreateSession}>
-          + Create New Session
-        </button>
-      </div>
 
-      {sessions.length === 0 ? (
-        <div className="glass" style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-muted)' }}>
-          <div style={{ fontSize: 36, marginBottom: 12 }}>📂</div>
-          <h3 style={{ color: '#ffffff', marginBottom: 6 }}>No Sessions Found</h3>
-          <p style={{ marginBottom: 16 }}>Start your first conversation session to chat with the agent and upload documents.</p>
-          <button className="btn btn-gradient" onClick={onCreateSession}>Create Session</button>
-        </div>
-      ) : (
-        <div className="sessions-grid">
-          {sessions.map(s => {
-            const isActive = s.session_id === activeSessionId
-            const createdStr = s.created_at ? new Date(s.created_at).toLocaleString() : 'Recent'
-            const fileCount = s.files?.length || 0
-
-            return (
-              <div
-                key={s.session_id}
-                className={`session-card glass ${isActive ? 'active' : ''}`}
-                onClick={() => onSelectSession(s.session_id)}
-              >
-                <div>
-                  <div className="session-card-header">
-                    <div className="session-card-title">{s.title || 'Conversation Session'}</div>
-                    <span className={`status-pill ${s.status === 'active' ? 'success' : ''}`}>
-                      {s.status}
-                    </span>
-                  </div>
-                  <div className="session-card-date">Created: {createdStr}</div>
-                </div>
-
-                <div className="session-card-files">
-                  <span>📑</span>
-                  <span>{fileCount} {fileCount === 1 ? 'file' : 'files'} attached</span>
-                </div>
-
-                <div className="session-card-actions">
-                  <button
-                    className="btn btn-gradient"
-                    style={{ padding: '6px 14px', fontSize: 12.5 }}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      onSelectSession(s.session_id)
-                    }}
-                  >
-                    Continue Chat →
-                  </button>
-                  <button
-                    className="file-action-btn delete"
-                    style={{ padding: '6px 10px' }}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      onDeleteSession && onDeleteSession(s.session_id)
-                    }}
-                    title="Delete Session"
-                  >
-                    🗑 Delete
-                  </button>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Ingestion Studio Component ─────────────────────────────────────────────────
-function IngestionStudio({ token, sessions, activeSessionId, onSessionChange }) {
-  const [files, setFiles] = useState([])
-  const [dragOver, setDragOver] = useState(false)
-  const [logs, setLogs] = useState([])
-  const pollersRef = useRef({})
-
-  const addLog = useCallback((msg, type = 'info') => {
-    setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), msg, type }])
-  }, [])
-
-  const startPolling = useCallback((uploadId, taskId) => {
-    const iv = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/ingest/status/${taskId}`)
-        const data = await res.json()
-
-        setFiles(prev => prev.map(f => f.uploadId !== uploadId ? f : {
-          ...f,
-          status: data.state === 'SUCCESS' ? 'done' : data.state === 'FAILURE' ? 'error' : 'running',
-          stage: data.stage,
-          message: data.message,
-          pct: 0.5 + (data.pct || 0) * 0.5,
-        }))
-
-        addLog(`[${data.stage || 'PROGRESS'}] ${data.message}`, data.state === 'SUCCESS' ? 'success' : 'info')
-
-        if (data.state === 'SUCCESS' || data.state === 'FAILURE') {
-          clearInterval(iv)
-          delete pollersRef.current[uploadId]
-        }
-      } catch (err) {
-        addLog(`Polling status error: ${err.message}`, 'error')
-      }
-    }, POLL_INTERVAL_MS)
-    pollersRef.current[uploadId] = iv
-  }, [addLog])
-
-  const handleFiles = useCallback(async (selectedFileList) => {
-    const fileArray = Array.from(selectedFileList)
-    if (!fileArray.length) return
-    if (!activeSessionId) {
-      alert('Please select or create a session first.')
-      return
-    }
-
-    addLog(`Initiated multi-file upload (${fileArray.length} files) for session: ${activeSessionId}`, 'info')
-
-    for (const file of fileArray) {
-      const uploadId = genId()
-      const entry = {
-        uploadId,
-        name: file.name,
-        size: file.size,
-        status: 'running',
-        stage: 'UPLOADING',
-        message: 'Slicing & uploading chunks…',
-        pct: 0.1,
-      }
-      setFiles(prev => [entry, ...prev])
-
-      try {
-        const taskId = await uploadFileInChunks(file, uploadId, activeSessionId, pct => {
-          setFiles(prev => prev.map(f => f.uploadId !== uploadId ? f : {
-            ...f,
-            pct,
-            message: `Uploading chunk slices: ${Math.round(pct * 100)}%`,
-          }))
-        }, token)
-
-        addLog(`Upload complete for ${file.name}. Ingestion task dispatched: ${taskId}`, 'success')
-        setFiles(prev => prev.map(f => f.uploadId !== uploadId ? f : {
-          ...f,
-          stage: 'PARSING',
-          message: 'PDF layout parsing & Rev AI media transcription…',
-          pct: 0.5,
-        }))
-        startPolling(uploadId, taskId)
-      } catch (err) {
-        addLog(`Failed to upload ${file.name}: ${err.message}`, 'error')
-        setFiles(prev => prev.map(f => f.uploadId !== uploadId ? f : { ...f, status: 'error', message: err.message }))
-      }
-    }
-  }, [activeSessionId, addLog, startPolling, token])
-
-  return (
-    <div className="workspace-container">
-      {/* Session destination selector */}
-      {sessions && sessions.length > 0 && (
-        <div className="session-bar glass" style={{ marginBottom: 4 }}>
-          <div className="session-selector">
-            <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)' }}>DESTINATION SESSION:</span>
-            <select
-              className="session-select"
-              value={activeSessionId}
-              onChange={e => onSessionChange(e.target.value)}
-            >
-              {sessions.map(s => (
-                <option key={s.session_id} value={s.session_id}>
-                  {s.title} ({s.status})
-                </option>
-              ))}
-            </select>
-          </div>
-          <span style={{ fontSize: 12, color: 'var(--accent-cyan)' }}>
-            ⚡ Files will be placed into the session folder and isolated in Weaviate.
-          </span>
-        </div>
-      )}
-
-      <div
-        className={`upload-dropzone ${dragOver ? 'drag-over' : ''}`}
-        onDragOver={e => { e.preventDefault(); setDragOver(true) }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={e => {
-          e.preventDefault()
-          setDragOver(false)
-          handleFiles(e.dataTransfer.files)
-        }}
-        onClick={() => document.getElementById('studio-file-picker').click()}
-      >
-        <input
-          id="studio-file-picker"
-          type="file"
-          multiple
-          accept=".pdf,.mp4,.mp3,.wav,.mov,.mkv,.aac,.flac"
-          style={{ display: 'none' }}
-          onChange={e => {
-            handleFiles(e.target.files)
-            e.target.value = ''
-          }}
-        />
-        <div className="upload-icon">📁</div>
-        <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1.4rem', marginBottom: 6 }}>
-          Drop Multiple PDF Documents & Media Audio/Video Files
-        </h3>
-        <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>
-          Upload multiple files simultaneously. PDFs are parsed with table clusters and bounding boxes, while video/audio files are transcribed and indexed into Triton & Weaviate.
-        </p>
-      </div>
-
-      {files.length > 0 && (
-        <div className="file-cards-list">
-          {files.map(item => (
-            <div key={item.uploadId} className="file-card-item glass">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-                <span style={{ fontSize: 24 }}>{item.name.endsWith('.pdf') ? '📄' : '🎬'}</span>
-                <div>
-                  <div style={{ fontWeight: 600 }}>{item.name}</div>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    {formatBytes(item.size)} • {item.message}
-                  </div>
-                </div>
-              </div>
-              <span className={`status-pill ${item.status === 'done' ? 'success' : ''}`}>
-                {item.status === 'done' ? '✓ Indexed' : item.status === 'error' ? '✗ Failed' : `${item.stage || 'Processing'}`}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {logs.length > 0 && (
-        <div style={{ background: '#0d1117', padding: 18, borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)', fontFamily: 'var(--font-mono)', fontSize: 12, maxHeight: 220, overflowY: 'auto' }}>
-          {logs.map((l, i) => (
-            <div key={i} style={{ color: l.type === 'error' ? 'var(--accent-rose)' : l.type === 'success' ? 'var(--accent-emerald)' : 'var(--text-secondary)', marginBottom: 4 }}>
-              <span style={{ color: 'var(--text-muted)' }}>[{l.time}]</span> {l.msg}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Auth Modal ─────────────────────────────────────────────────────────────────
-function AuthModal({ isOpen, onClose, onAuthSuccess }) {
-  const [mode, setMode] = useState('login')
-  const [username, setUsername] = useState('')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
-
-  if (!isOpen) return null
-
-  const handleSubmit = async (e) => {
-    e.preventDefault()
-    setError('')
-    setLoading(true)
-
-    try {
-      if (mode === 'register') {
-        const res = await fetch('/api/auth/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, email, password }),
-        })
-        const text = await res.text()
-        let data = {}
-        try { data = JSON.parse(text) } catch { data = { detail: text } }
-        if (!res.ok) throw new Error(data.detail || 'Registration failed')
-        setMode('login')
-      }
-
-      const form = new URLSearchParams()
-      form.append('username', username)
-      form.append('password', password)
-
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: form,
-      })
-      const text = await res.text()
-      let data = {}
-      try { data = JSON.parse(text) } catch { data = { detail: text } }
-      if (!res.ok) throw new Error(data.detail || 'Authentication failed')
-
-      localStorage.setItem('graphrag_access_token', data.access_token)
-      localStorage.setItem('graphrag_refresh_token', data.refresh_token)
-      localStorage.setItem('graphrag_username', data.username)
-
-      onAuthSuccess(data.access_token, data.refresh_token, data.username)
-      onClose()
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-dialog glass" style={{ maxWidth: 440 }} onClick={e => e.stopPropagation()}>
-        <div className="modal-head">
-          <div className="modal-title">{mode === 'login' ? '🔐 Enterprise Sign In' : '✨ Create Enterprise Account'}</div>
-          <button className="modal-close-btn" onClick={onClose}>✕</button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="modal-body">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div>
-              <label style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4, display: 'block' }}>Username</label>
-              <input
-                className="chat-input"
-                style={{ width: '100%' }}
-                type="text"
-                required
-                value={username}
-                onChange={e => setUsername(e.target.value)}
-                placeholder="e.g. enterprise_admin"
-              />
-            </div>
-
-            {mode === 'register' && (
-              <div>
-                <label style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4, display: 'block' }}>Email</label>
-                <input
-                  className="chat-input"
-                  style={{ width: '100%' }}
-                  type="email"
-                  required
-                  value={email}
-                  onChange={e => setEmail(e.target.value)}
-                  placeholder="name@enterprise.com"
-                />
-              </div>
-            )}
-
-            <div>
-              <label style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4, display: 'block' }}>Password</label>
-              <input
-                className="chat-input"
-                style={{ width: '100%' }}
-                type="password"
-                required
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                placeholder="••••••••"
-              />
-            </div>
-
-            {error && (
-              <div style={{ color: 'var(--accent-rose)', fontSize: 13, background: 'rgba(244, 63, 94, 0.1)', padding: '8px 12px', borderRadius: 6 }}>
-                ⚠ {error}
-              </div>
-            )}
-
-            <button className="btn btn-gradient" type="submit" disabled={loading} style={{ marginTop: 8 }}>
-              {loading ? 'Authenticating…' : mode === 'login' ? 'Sign In' : 'Register Account'}
-            </button>
-
-            <div style={{ fontSize: 13, textAlign: 'center', color: 'var(--text-muted)', marginTop: 6 }}>
-              {mode === 'login' ? (
-                <span>Need an account? <a href="#register" onClick={() => setMode('register')}>Register now</a></span>
-              ) : (
-                <span>Already registered? <a href="#login" onClick={() => setMode('login')}>Sign in</a></span>
-              )}
-            </div>
-          </div>
-        </form>
-      </div>
-    </div>
-  )
-}
 
 // ── Main App Root ─────────────────────────────────────────────────────────────
 export default function App() {
-  const [view, setView] = useState(() => {
-    const savedToken = localStorage.getItem('graphrag_access_token')
-    return savedToken ? 'workspace' : 'auth'
-  })
   const [token, setToken] = useState(() => localStorage.getItem('graphrag_access_token') || '')
   const [refreshToken, setRefreshToken] = useState(() => localStorage.getItem('graphrag_refresh_token') || '')
   const [username, setUsername] = useState(() => localStorage.getItem('graphrag_username') || '')
-  const [memoryModalOpen, setMemoryModalOpen] = useState(false)
-  const [memoryData, setMemoryData] = useState(null)
-  // HiTL state: holds the pending approval_required event payload
+  const [authTab, setAuthTab] = useState('login')
   const [hitlPending, setHitlPending] = useState(null)
   const [resumeStream, setResumeStream] = useState(null)
-
   const [sessions, setSessions] = useState([])
-  const [activeSessionId, setActiveSessionId] = useState(() => localStorage.getItem('graphrag_active_session') || '')
+  const [activeSessionId, setActiveSessionId] = useState(() => {
+    const pathname = window.location.pathname
+    if (pathname.startsWith('/session/')) {
+      const sid = pathname.replace('/session/', '').trim()
+      if (sid) return sid
+    }
+    return localStorage.getItem('graphrag_active_session') || ''
+  })
+
+  // Initial view: default to landing page only (or workspace if direct /session/:id URL with token, or sessions if /sessions)
+  const [view, setView] = useState(() => {
+    const pathname = window.location.pathname
+    const savedToken = localStorage.getItem('graphrag_access_token')
+    if (pathname.startsWith('/session/')) {
+      const sid = pathname.replace('/session/', '').trim()
+      if (savedToken && sid) return 'workspace'
+    }
+    if (pathname === '/sessions') {
+      if (savedToken) return 'history'
+    }
+    if (pathname === '/auth') {
+      return 'auth'
+    }
+    return 'landing'
+  })
 
   const selectSession = useCallback((sid) => {
     setActiveSessionId(sid || '')
     if (sid) localStorage.setItem('graphrag_active_session', sid)
     else localStorage.removeItem('graphrag_active_session')
   }, [])
+
+  const navigateTo = useCallback((targetView, path = null, sessionId = null) => {
+    setView(targetView)
+    const targetSessionId = (sessionId !== null && sessionId !== undefined) ? sessionId : activeSessionId
+    if (sessionId !== null && sessionId !== undefined) {
+      selectSession(sessionId)
+    }
+    const newPath = path || (
+      targetView === 'landing' ? '/' :
+      targetView === 'history' ? '/sessions' :
+      targetView === 'workspace' ? (targetSessionId ? `/session/${targetSessionId}` : '/workspace') :
+      targetView === 'auth' ? '/auth' : '/'
+    )
+    if (window.location.pathname !== newPath) {
+      window.history.pushState(null, '', newPath)
+    }
+  }, [activeSessionId, selectSession])
+
+  // Handle OAuth hash tokens arriving from Google redirect (#access_token=...&refresh_token=...&username=...)
+  useEffect(() => {
+    const hash = window.location.hash
+    if (!hash) return
+    const params = new URLSearchParams(hash.slice(1))
+    const accessToken = params.get('access_token')
+    const rToken = params.get('refresh_token')
+    const uName = params.get('username')
+    if (accessToken) {
+      localStorage.setItem('graphrag_access_token', accessToken)
+      if (rToken) localStorage.setItem('graphrag_refresh_token', rToken)
+      if (uName) localStorage.setItem('graphrag_username', uName)
+      setToken(accessToken)
+      if (rToken) setRefreshToken(rToken)
+      if (uName) setUsername(uName)
+      window.history.replaceState(null, '', '/sessions')
+      navigateTo('history', '/sessions')
+    }
+  }, [navigateTo])
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const pathname = window.location.pathname
+      const savedToken = localStorage.getItem('graphrag_access_token')
+      if (pathname.startsWith('/session/')) {
+        const sid = pathname.replace('/session/', '').trim()
+        if (sid) {
+          selectSession(sid)
+          setView('workspace')
+          return
+        }
+      }
+      if (pathname === '/sessions') {
+        setView('history')
+        return
+      }
+      if (pathname === '/auth') {
+        setView('auth')
+        return
+      }
+      setView('landing')
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [selectSession])
 
   useEffect(() => {
     const onRefreshed = () => {
@@ -1747,7 +1506,7 @@ export default function App() {
       setToken('')
       setRefreshToken('')
       setUsername('')
-      setView('auth')
+      navigateTo('landing', '/')
     }
     window.addEventListener('auth_token_refreshed', onRefreshed)
     window.addEventListener('auth_logout', onLogout)
@@ -1755,7 +1514,7 @@ export default function App() {
       window.removeEventListener('auth_token_refreshed', onRefreshed)
       window.removeEventListener('auth_logout', onLogout)
     }
-  }, [])
+  }, [navigateTo])
 
   const loadSessions = useCallback(async () => {
     try {
@@ -1770,30 +1529,15 @@ export default function App() {
             localStorage.setItem('graphrag_active_session', chosen)
             return chosen
           })
-        } else {
-          // Auto-create initial session for new user
-          const createRes = await authFetch('/api/sessions', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ title: 'New RAG Session' }),
-          })
-          if (createRes.ok) {
-            const newSess = await createRes.json()
-            const sid = newSess.id || newSess.session_id
-            setSessions([newSess])
-            selectSession(sid)
-          }
         }
       }
-    } catch (err) {
-      console.error('Error fetching sessions:', err)
-    }
-  }, [selectSession])
+    } catch { }
+  }, [])
 
   useEffect(() => {
-    if (token) loadSessions()
+    if (token) {
+      loadSessions()
+    }
   }, [token, loadSessions])
 
   const handleCreateSession = async () => {
@@ -1810,9 +1554,9 @@ export default function App() {
         throw new Error(errData.detail || 'Failed to create session')
       }
       const newSess = await res.json()
+      const sid = newSess.id || newSess.session_id
       setSessions(prev => [newSess, ...prev])
-      selectSession(newSess.id || newSess.session_id)
-      setView('workspace')
+      navigateTo('workspace', `/session/${sid}`, sid)
     } catch (err) {
       alert(err.message)
     }
@@ -1840,32 +1584,9 @@ export default function App() {
     }
   }
 
-  const handleEndSession = async () => {
-    if (!activeSessionId) return
-    try {
-      const res = await authFetch(`/api/sessions/${activeSessionId}/end`, {
-        method: 'POST',
-      })
-      if (!res.ok) throw new Error('Failed to end session')
-      const data = await res.json()
-      alert(`Session closed: ${data.message}`)
-      setSessions(prev => prev.map(s => (s.id || s.session_id) !== activeSessionId ? s : { ...s, status: 'ending' }))
-    } catch (err) {
-      alert(err.message)
-    }
-  }
 
-  const handleViewMemories = async () => {
-    if (!activeSessionId) return
-    try {
-      const res = await authFetch(`/api/sessions/${activeSessionId}/memories`)
-      if (!res.ok) throw new Error('Failed to load memories')
-      const data = await res.json()
-      setMemoryData(data)
-      setMemoryModalOpen(true)
-    } catch (err) {
-      alert(`Failed to load session memory graphs: ${err.message}`)
-    }
+  const handleEndSession = () => {
+    navigateTo('history', '/sessions')
   }
 
   const handleSessionTitleUpdated = (sessionId, newTitle) => {
@@ -1895,6 +1616,7 @@ export default function App() {
     setUsername('')
     setSessions([])
     selectSession('')
+    navigateTo('landing', '/')
   }
 
   const activeSessionObj = sessions.find(s => (s.id || s.session_id) === activeSessionId) || { session_id: activeSessionId, id: activeSessionId, title: 'Active Session' }
@@ -1908,7 +1630,7 @@ export default function App() {
   return (
     <div className="app">
       <header className="header">
-        <div className="brand" onClick={() => setView('workspace')}>
+        <div className="brand" onClick={() => navigateTo('landing', '/')} style={{ cursor: 'pointer' }} title="Go to Home / Landing Page">
           <div className="brand-icon">⚡</div>
           <div>
             <div className="brand-name">Enterprise RAG</div>
@@ -1916,41 +1638,16 @@ export default function App() {
           <span className="brand-tag">v2.0</span>
         </div>
 
-        <nav className="nav-tabs">
-          <button
-            className={`nav-btn ${view === 'workspace' ? 'active' : ''}`}
-            onClick={() => setView('workspace')}
-          >
-            💬 Agent Workspace
-          </button>
-          <button
-            className={`nav-btn ${view === 'history' ? 'active' : ''}`}
-            onClick={() => setView('history')}
-          >
-            🗂 Sessions History
-          </button>
-          <button
-            className={`nav-btn ${view === 'ingest' ? 'active' : ''}`}
-            onClick={() => setView('ingest')}
-          >
-            📥 Ingestion Studio
-          </button>
-          <button
-            className={`nav-btn ${view === 'landing' ? 'active' : ''}`}
-            onClick={() => setView('landing')}
-          >
-            🚀 Overview
-          </button>
-        </nav>
-
         <div className="header-actions">
-          <div className="status-pill">
-            <span className="status-dot" />
-            <span>Triton & Weaviate Ready</span>
-          </div>
-
           {token ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button
+                className="btn btn-ghost"
+                style={{ padding: '7px 16px', fontSize: 13, border: '1px solid var(--border-subtle)' }}
+                onClick={() => navigateTo('history', '/sessions')}
+              >
+                🗂 My Sessions
+              </button>
               <GmailStatusBar token={token} />
               <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>👤 {username}</span>
               <button className="btn btn-ghost" style={{ padding: '6px 12px', fontSize: 12.5 }} onClick={handleLogout}>
@@ -1958,9 +1655,30 @@ export default function App() {
               </button>
             </div>
           ) : (
-            <button className="btn btn-gradient" style={{ padding: '7px 16px', fontSize: 13 }} onClick={() => setView('auth')}>
-              Sign In / Register
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button
+                id="btn-nav-signin"
+                className="btn btn-ghost"
+                style={{ padding: '7px 14px', fontSize: 13 }}
+                onClick={() => {
+                  setAuthTab('login')
+                  navigateTo('auth', '/auth')
+                }}
+              >
+                Sign In
+              </button>
+              <button
+                id="btn-nav-signup"
+                className="btn btn-gradient"
+                style={{ padding: '7px 16px', fontSize: 13 }}
+                onClick={() => {
+                  setAuthTab('register')
+                  navigateTo('auth', '/auth')
+                }}
+              >
+                Sign Up
+              </button>
+            </div>
           )}
         </div>
       </header>
@@ -1968,17 +1686,29 @@ export default function App() {
       <main style={{ flex: 1 }}>
         {view === 'auth' && (
           <AuthPage
+            initialTab={authTab}
             onAuthSuccess={({ token: acc, username: uname }) => {
               setToken(acc)
               setUsername(localStorage.getItem('graphrag_username') || uname)
-              setView('workspace')
+              setRefreshToken(localStorage.getItem('graphrag_refresh_token') || '')
               loadSessions()
+              navigateTo('history', '/sessions')
             }}
           />
         )}
 
         {view === 'landing' && (
-          <LandingPage onExploreWorkspace={() => setView('workspace')} />
+          <LandingPage
+            isLoggedIn={Boolean(token)}
+            onExploreWorkspace={() => {
+              if (token) {
+                navigateTo('history', '/sessions')
+              } else {
+                setAuthTab('login')
+                navigateTo('auth', '/auth')
+              }
+            }}
+          />
         )}
 
         {view === 'workspace' && (
@@ -1998,10 +1728,9 @@ export default function App() {
               activeSession={activeSessionObj}
               sessions={sessions}
               onSessionTitleUpdated={handleSessionTitleUpdated}
-              onSessionChange={selectSession}
+              onSessionChange={(sid) => navigateTo('workspace', `/session/${sid}`, sid)}
               onCreateSession={handleCreateSession}
               onEndSession={handleEndSession}
-              onViewMemories={handleViewMemories}
               onHiTLRequired={setHitlPending}
               resumeStream={resumeStream}
             />
@@ -2013,29 +1742,13 @@ export default function App() {
             sessions={sessions}
             activeSessionId={activeSessionId}
             onSelectSession={(sessId) => {
-              setActiveSessionId(sessId)
-              setView('workspace')
+              navigateTo('workspace', `/session/${sessId}`, sessId)
             }}
             onCreateSession={handleCreateSession}
             onDeleteSession={handleDeleteSession}
           />
         )}
-
-        {view === 'ingest' && (
-          <IngestionStudio
-            token={token}
-            sessions={sessions}
-            activeSessionId={activeSessionId}
-            onSessionChange={setActiveSessionId}
-          />
-        )}
       </main>
-
-      <MemoriesModal
-        isOpen={memoryModalOpen}
-        memoryData={memoryData}
-        onClose={() => setMemoryModalOpen(false)}
-      />
     </div>
   )
 }

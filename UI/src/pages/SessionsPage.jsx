@@ -5,9 +5,9 @@ export default function SessionsPage({ sessions, activeSessionId, onSelectSessio
     <div className="sessions-history-container">
       <div className="sessions-history-header">
         <div>
-          <h2 className="sessions-history-title">🗂 Conversation Sessions History</h2>
+          <h2 className="sessions-history-title">🗂 Conversation Sessions</h2>
           <p className="sessions-history-desc">
-            All your conversations stored in MongoDB. Click any session to continue the chat with its isolated documents and memory.
+            Select a session to start or continue your conversation with isolated documents and memory.
           </p>
         </div>
         <button className="btn btn-gradient" onClick={onCreateSession}>
@@ -27,52 +27,45 @@ export default function SessionsPage({ sessions, activeSessionId, onSelectSessio
           {sessions.map(s => {
             const sid = s.session_id || s.id
             const isActive = sid === activeSessionId
-            const createdStr = s.created_at ? new Date(s.created_at).toLocaleString() : 'Recent'
-            const fileCount = s.files?.length || 0
+            const createdStr = s.created_at ? new Date(s.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Recent'
 
             return (
               <div
                 key={sid}
-                className={`session-card glass ${isActive ? 'active' : ''}`}
+                className={`session-card glass clickable-session-card ${isActive ? 'active' : ''}`}
                 onClick={() => onSelectSession(sid)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    onSelectSession(sid)
+                  }
+                }}
               >
-                <div>
-                  <div className="session-card-header">
-                    <div className="session-card-title">{s.title || 'Conversation Session'}</div>
-                    <span className={`status-pill ${s.status === 'active' ? 'success' : ''}`}>
-                      {s.status}
-                    </span>
+                <div className="session-card-header">
+                  <div className="session-card-title-wrap">
+                    <span className="session-card-icon">💬</span>
+                    <div className="session-card-title" title={s.title || 'Conversation Session'}>
+                      {s.title || 'Conversation Session'}
+                    </div>
                   </div>
-                  <div className="session-card-date">Created: {createdStr}</div>
-                </div>
-
-                <div className="session-card-files">
-                  <span>📑</span>
-                  <span>{fileCount} {fileCount === 1 ? 'file' : 'files'} attached</span>
-                </div>
-
-                <div className="session-card-actions">
                   <button
-                    className="btn btn-gradient"
-                    style={{ padding: '6px 14px', fontSize: 12.5 }}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      onSelectSession(sid)
-                    }}
-                  >
-                    Continue Chat →
-                  </button>
-                  <button
-                    className="file-action-btn delete"
-                    style={{ padding: '6px 10px' }}
+                    type="button"
+                    className="session-delete-btn"
                     onClick={(e) => {
                       e.stopPropagation()
                       onDeleteSession && onDeleteSession(sid)
                     }}
                     title="Delete Session"
+                    aria-label="Delete Session"
                   >
-                    🗑 Delete
+                    🗑️
                   </button>
+                </div>
+
+                <div className="session-card-footer">
+                  <span className="session-card-date">🕒 {createdStr}</span>
                 </div>
               </div>
             )

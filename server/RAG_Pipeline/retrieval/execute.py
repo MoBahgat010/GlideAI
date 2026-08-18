@@ -2,7 +2,6 @@ from .pipeline import RetrievalPipeline
 from .reranker import HybridReranker
 from ..ingestion.embedding import MultimodalEncoder
 from ..storage.weaviate import WeaviateVDB
-from ..storage.vector_database import VDB
 
 from config import (
     TRITON_GRPC_URL,
@@ -16,13 +15,13 @@ from config import (
 
 encoder = MultimodalEncoder(url=TRITON_GRPC_URL, d_model=int(EMBEDDING_MODEL_D_MODEL))
 reranker = HybridReranker(url=TRITON_GRPC_URL)
-weaviate_strategy = WeaviateVDB(
+
+vdb = WeaviateVDB(
     endpoint=WEAVIATE_REST_ENDPOINT,
     api_key=WEAVIATE_API_KEY,
     index=INDEX_NAME,
     dimension=encoder.d_model,
 )
-vdb = VDB(weaviate_strategy)
 
 retrieval_pipeline = RetrievalPipeline(
     encoder=encoder,

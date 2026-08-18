@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from config import TRITON_HTTP_URL, UPLOAD_DIR, CHUNKS_DIR
 
-from src.db.mongo import MongoManager
+from src.db.mongo import mongo
 from src.db.redis import close_redis
 from src.routers.auth import router as auth_router
 from src.routers.chat import router as chat_router, agent_runner
@@ -60,15 +60,11 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("Triton Inference Server at '%s' is not ready yet. Inference will connect dynamically.", TRITON_HTTP_URL)
 
-    try:
-        await MongoManager.connect()
-    except Exception as e:
-        logger.warning("MongoDB connection setup during startup: %s", e)
-
+    mongo.connect()
     yield
 
     logger.info("Shutting down Enterprise RAG Platform...")
-    await MongoManager.close()
+    mongo.close()
     await close_redis()
     vdb.close()
 

@@ -2,66 +2,23 @@ import asyncio
 import base64
 import logging
 from email.message import EmailMessage
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, Any, Tuple
 
 from googleapiclient.discovery import build
-from langchain_core.tools import tool
-from langchain_core.runnables import RunnableConfig
+from langchain.tools import tool, ToolRuntime
 
-from src.db.mongo import mongo_db
 from src.services.google_creds import get_user_google_credentials
 from .base_tools import Tools
 
 logger = logging.getLogger("agent.tools.gmail")
 
 
-from langchain_core.runnables.config import var_child_runnable_config
-
-
-def resolve_user_id(config: Optional[RunnableConfig] = None) -> Optional[str]:
+async def get_authenticated_gmail_service(runtime: ToolRuntime) -> Tuple[Optional[Any], Optional[str]]:
     """
-    Extract user_id from:
-    1. Direct RunnableConfig parameter
-    2. LangChain active runtime context via var_child_runnable_config.get()
-    3. MongoDB session lookup by thread_id
-    """
-    cfg_to_check = config
-    if not cfg_to_check:
-        try:
-            cfg_to_check = var_child_runnable_config.get()
-        except Exception:
-            cfg_to_check = None
-
-    if cfg_to_check and isinstance(cfg_to_check, dict):
-        cfg = cfg_to_check.get("configurable", {})
-        if isinstance(cfg, dict):
-            # 1. Direct user_id
-            if cfg.get("user_id"):
-                return str(cfg["user_id"])
-
-            # 2. Direct user
-            if cfg.get("user"):
-                return str(cfg["user"])
-
-            # 3. Lookup via thread_id / session_id in MongoDB
-            thread_id = cfg.get("thread_id") or cfg.get("session_id")
-            if thread_id:
-                try:
-                    session_doc = mongo_db.sessions.find_one({"session_id": str(thread_id)})
-                    if session_doc and session_doc.get("user_id"):
-                        return str(session_doc["user_id"])
-                except Exception as exc:
-                    logger.debug("Failed to resolve user_id from thread_id %s: %s", thread_id, exc)
-
-    return None
-
-
-async def get_authenticated_gmail_service(config: Optional[RunnableConfig] = None) -> Tuple[Optional[Any], Optional[str]]:
-    """
-    Resolve user context and construct an authenticated Google Gmail API service.
+    Resolve user context from ToolRuntime and construct an authenticated Google Gmail API service.
     Returns (service, error_message).
     """
-    user_id = resolve_user_id(config)
+    user_id = runtime.context.get("user_id") if runtime and runtime.context else None
     if not user_id:
         return None, "Error: User ID not available in session context. Please ensure you are logged in."
 
@@ -124,9 +81,9 @@ def parse_message_payload(msg_data: dict) -> dict:
 
 @tool
 async def fetch_user_emails(
+    runtime: ToolRuntime,
     query: str = "is:inbox",
     max_results: int = 10,
-    config: Optional[RunnableConfig] = None,
 ) -> str:
     """
     Fetch and search user emails from Gmail using the Google Gmail API.
@@ -134,12 +91,11 @@ async def fetch_user_emails(
     Args:
         query: Gmail search query filter (e.g. 'is:unread', 'from:colleague@company.com', 'subject:invoice', 'newer_than:7d', 'is:inbox').
         max_results: Maximum number of emails to retrieve (default: 10, max: 25).
-        config: Execution runtime config containing user authentication info.
 
     Returns:
         Structured summary of emails including ID, Subject, From, Date, and message preview.
     """
-    service, err = await get_authenticated_gmail_service(config)
+    service, err = await get_authenticated_gmail_service(runtime)
     if err:
         return err
 
@@ -191,19 +147,18 @@ async def fetch_user_emails(
 @tool
 async def get_email_details(
     message_id: str,
-    config: Optional[RunnableConfig] = None,
+    runtime: ToolRuntime,
 ) -> str:
     """
     Get the full details and body content of a specific Gmail email by message ID.
 
     Args:
         message_id: The unique Gmail message ID.
-        config: Execution runtime config containing user authentication info.
 
     Returns:
         Full details and readable text body of the email.
     """
-    service, err = await get_authenticated_gmail_service(config)
+    service, err = await get_authenticated_gmail_service(runtime)
     if err:
         return err
 
@@ -237,7 +192,7 @@ async def send_email(
     to: str,
     subject: str,
     body: str,
-    config: Optional[RunnableConfig] = None,
+    runtime: ToolRuntime,
 ) -> str:
     """
     Send an email from the user's Gmail account via the Google Gmail API.
@@ -246,12 +201,11 @@ async def send_email(
         to: Recipient email address (e.g. 'recipient@example.com').
         subject: The subject line of the email.
         body: The plain text body content of the email.
-        config: Execution runtime config containing user authentication info.
 
     Returns:
         Confirmation status and sent message ID.
     """
-    service, err = await get_authenticated_gmail_service(config)
+    service, err = await get_authenticated_gmail_service(runtime)
     if err:
         return err
 

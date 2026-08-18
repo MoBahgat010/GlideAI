@@ -10,7 +10,7 @@ from celery.result import AsyncResult
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Depends
 from config import CHUNKS_DIR, UPLOAD_DIR
 
-from src.auth.dependencies import get_optional_user
+from src.auth.dependencies import get_current_user
 from src.jobs.tasks import celery_app, run_ingestion
 
 logger = logging.getLogger("server.routers.ingest")
@@ -47,7 +47,7 @@ async def finalize_upload(
     filename: str = Form(...),
     total_chunks: int = Form(...),
     session_id: str = Form(...),
-    user: Optional[dict] = Depends(get_optional_user),
+    user: Optional[dict] = Depends(get_current_user),
 ):
     if not session_id:
         raise HTTPException(400, "session_id is required")

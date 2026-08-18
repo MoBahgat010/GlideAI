@@ -57,14 +57,12 @@ class SessionResponse(BaseModel):
     title: str
     status: str
     created_at: datetime
-    memory_extracted: bool = False
     files: Optional[List[FileMetadata]] = []
 
 
 class SessionEndResponse(BaseModel):
     session_id: str
     status: str
-    task_id: str
     message: str
 
 
@@ -99,6 +97,10 @@ class AgentAnswersResponse(BaseModel):
     answers: List[AnswerWithCitations] = []
 
 
+class SessionTitle(BaseModel):
+    title: str = Field(..., description="A concise, descriptive title for the session (3 to 6 words maximum).")
+
+
 class GenerateTitleRequest(BaseModel):
     prompt: str
 
@@ -109,29 +111,6 @@ class AskRequest(BaseModel):
 
 class AskSessionRequest(BaseModel):
     query: str
-
-
-class EpisodicMemoryResponse(BaseModel):
-    session_id: str
-    summary: str
-    key_events: List[str]
-    created_at: Optional[datetime] = None
-
-
-class SemanticMemoryResponse(BaseModel):
-    session_id: str
-    facts: List[str]
-    preferences: List[str]
-    created_at: Optional[datetime] = None
-
-
-class MemoryStatusResponse(BaseModel):
-    session_id: str
-    enable_semantic: bool
-    enable_episodic: bool
-    enable_working: bool
-    episodic_memory: Optional[dict] = None
-    semantic_memory: Optional[dict] = None
 
 
 class GoogleServiceStatus(BaseModel):

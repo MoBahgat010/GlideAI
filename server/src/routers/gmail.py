@@ -17,8 +17,8 @@ from config import (
     FRONTEND_URL,
     GMAIL_SCOPES,
 )
-from src.auth.dependencies import get_current_user, get_optional_user
-from src.db.mongo import MongoManager
+from src.auth.dependencies import get_current_user
+from src.db.mongo import mongo
 from src.db.redis import RedisManager
 from src.models.schemas import GoogleServiceStatus
 from src.services.google_creds import get_user_google_credentials
@@ -32,7 +32,7 @@ STATE_TTL = 300
 @router.get("/connect")
 async def gmail_connect(
     token: Optional[str] = Query(None, description="JWT token for browser redirect"),
-    current_user: Optional[dict] = Depends(get_optional_user),
+    current_user: Optional[dict] = Depends(get_current_user),
 ):
     """Start Google Gmail OAuth flow."""
     user = current_user
@@ -71,7 +71,7 @@ async def gmail_callback(code: str, state: str):
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
-            GOOGLE_TOKEN_URI or "https://oauth2.googleapis.com/token",
+            GOOGLE_TOKEN_URI,
             data={
                 "client_id": GOOGLE_CLIENT_ID,
                 "client_secret": GOOGLE_CLIENT_SECRET,
@@ -97,13 +97,11 @@ async def gmail_callback(code: str, state: str):
 
     # Preserve existing refresh_token if Google didn't return a new one
     if not token_doc["refresh_token"]:
-        db = MongoManager.get_db()
-        existing = await db.users.find_one({"_id": user_id})
+        existing = mongo.users.find_one({"_id": user_id})
         if existing and existing.get("gmail_tokens"):
             token_doc["refresh_token"] = existing["gmail_tokens"].get("refresh_token")
 
-    db = MongoManager.get_db()
-    await db.users.update_one({"_id": user_id}, {"$set": {"gmail_tokens": token_doc}})
+    mongo.users.update_one({"_id": user_id}, {"$set": {"gmail_tokens": token_doc}})
     logger.info("Gmail tokens stored for user_id=%s", user_id)
     return RedirectResponse(f"{FRONTEND_URL}?gmail_connected=true")
 

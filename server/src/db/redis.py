@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional, List
+from typing import Any, Optional
 import redis
 import redis.asyncio as aioredis
-from langchain_community.chat_message_histories import RedisChatMessageHistory
 
 from config import REDIS_URL
 
 logger = logging.getLogger("server.db.redis")
 
-DEFAULT_SESSION_TTL_SECONDS = 7 * 86400
 
 class RedisManager:
     _async_client: Optional[aioredis.Redis] = None
@@ -143,60 +141,6 @@ class RedisAuthUtils:
         except Exception as exc:
             logger.warning("Failed to check blacklist for JTI %s: %s", jti, exc)
             return False
-
-
-
-class RedisSessionUtils:
-    """Utilities for managing LangChain chat histories and session working memory."""
-
-    @staticmethod
-    def get_session_storage_key(session_id: Optional[str]) -> str:
-        """Format consistent Redis key for session working memory."""
-        return f"session:{session_id}:working_memory"
-
-    @classmethod
-    def get_chat_history(
-        cls,
-        session_id: Optional[str],
-        ttl: int = DEFAULT_SESSION_TTL_SECONDS,
-        url: str = REDIS_URL,
-    ) -> RedisChatMessageHistory:
-        """
-        Instantiate a RedisChatMessageHistory client for a given session ID.
-        """
-        storage_key = cls.get_session_storage_key(session_id)
-        return RedisChatMessageHistory(
-            session_id=storage_key,
-            url=url,
-            ttl=ttl,
-        )
-
-    @classmethod
-    async def delete_session_memory(cls, session_id: str) -> bool:
-        """Delete all Redis working memory and LangChain message store keys for a session."""
-        client = RedisManager.get_client()
-        storage_key = cls.get_session_storage_key(session_id)
-        try:
-            await client.delete(storage_key)
-            await client.delete(f"message_store:{storage_key}")
-            return True
-        except Exception as exc:
-            logger.warning("Failed to delete session memory in Redis for %s: %s", session_id, exc)
-            return False
-
-    @classmethod
-    def delete_session_memory_sync(cls, session_id: str) -> bool:
-        """Synchronously delete session working memory keys (e.g. for Celery tasks)."""
-        client = RedisManager.get_sync_client()
-        storage_key = cls.get_session_storage_key(session_id)
-        try:
-            client.delete(storage_key)
-            client.delete(f"message_store:{storage_key}")
-            return True
-        except Exception as exc:
-            logger.warning("Failed sync deletion of session memory for %s: %s", session_id, exc)
-            return False
-
 
 
 class RedisCacheUtils:

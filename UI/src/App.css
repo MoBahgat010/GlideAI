@@ -1561,63 +1561,97 @@
 }
 
 .session-card {
-  background: var(--bg-card);
+  background: rgba(15, 23, 42, 0.7);
+  backdrop-filter: blur(12px);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  padding: 18px 20px;
+  padding: 20px 22px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: 14px;
+  gap: 16px;
   transition: all var(--transition-normal);
   cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  text-align: left;
 }
 
 .session-card:hover {
-  border-color: var(--border-glass);
-  transform: translateY(-2px);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  border-color: rgba(99, 102, 241, 0.6);
+  transform: translateY(-3px);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 0 16px rgba(99, 102, 241, 0.2);
+  background: rgba(22, 27, 34, 0.85);
 }
 
 .session-card.active {
   border-color: var(--accent-primary);
-  box-shadow: 0 0 20px rgba(99, 102, 241, 0.2);
+  box-shadow: 0 0 24px rgba(99, 102, 241, 0.3);
 }
 
 .session-card-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  gap: 12px;
+}
+
+.session-card-title-wrap {
+  display: flex;
+  align-items: flex-start;
   gap: 10px;
+  flex: 1;
+}
+
+.session-card-icon {
+  font-size: 20px;
+  margin-top: 1px;
+  flex-shrink: 0;
 }
 
 .session-card-title {
-  font-size: 15px;
+  font-size: 15.5px;
   font-weight: 700;
   color: #ffffff;
   line-height: 1.4;
+  word-break: break-word;
+}
+
+.session-delete-btn {
+  background: rgba(244, 63, 94, 0.1);
+  border: 1px solid rgba(244, 63, 94, 0.25);
+  color: #f43f5e;
+  border-radius: 8px;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.session-delete-btn:hover {
+  background: #f43f5e;
+  color: #ffffff;
+  border-color: #f43f5e;
+  transform: scale(1.1);
+  box-shadow: 0 0 10px rgba(244, 63, 94, 0.5);
+}
+
+.session-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .session-card-date {
   font-size: 12px;
   color: var(--text-muted);
-  margin-top: 4px;
-}
-
-.session-card-files {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--accent-cyan);
-}
-
-.session-card-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-subtle);
 }
 
 /* ── AuthPage ─────────────────────────────────────────────────────────────── */

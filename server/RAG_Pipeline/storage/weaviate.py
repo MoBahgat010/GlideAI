@@ -12,11 +12,9 @@ from weaviate.util import generate_uuid5
 
 from config import EMBED_BATCH
 
-from .vector_storage_strategy import VectorDatabaseStrategy
-
 logger = logging.getLogger("storage.weaviate")
 
-class WeaviateVDB(VectorDatabaseStrategy):
+class WeaviateVDB():
     def __init__(
         self,
         endpoint: str,

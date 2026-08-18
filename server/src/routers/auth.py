@@ -2,9 +2,8 @@ from datetime import datetime, timezone
 import uuid
 import logging
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Header, status
+from fastapi import APIRouter, Depends, HTTPException, Header, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
-from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from src.auth.dependencies import get_current_user
 from src.auth.jwt import (
@@ -16,7 +15,7 @@ from src.auth.jwt import (
     hash_password,
     verify_password,
 )
-from src.db.mongo import get_database
+from src.db.mongo import mongo
 from src.models.schemas import (
     Token,
     UserRegister,
@@ -29,9 +28,9 @@ logger = logging.getLogger("server.routers.auth")
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def register(user_in: UserRegister, db: AsyncIOMotorDatabase = Depends(get_database)):
-    existing_user = await db.users.find_one({
+@router.post("/register", response_model=Token, status_code=status.HTTP_201_CREATED)
+async def register(user_in: UserRegister):
+    existing_user = mongo.users.find_one({
         "$or": [{"username": user_in.username.strip()}, {"email": user_in.email.strip().lower()}]
     })
     if existing_user:
@@ -49,30 +48,56 @@ async def register(user_in: UserRegister, db: AsyncIOMotorDatabase = Depends(get
         "password_hash": hash_password(user_in.password),
         "created_at": now,
     }
-    await db.users.insert_one(user_doc)
+    mongo.users.insert_one(user_doc)
     logger.info("Registered new user: %s (id=%s)", user_doc["username"], user_id)
 
-    return UserResponse(
-        id=user_id,
+    access_token = create_access_token(data={"sub": user_doc["username"], "user_id": user_id})
+    refresh_token, ttl_seconds = await create_refresh_token(user_id=user_id, username=user_doc["username"])
+
+    return Token(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+        expires_in=900,
         username=user_doc["username"],
-        email=user_doc["email"],
-        created_at=user_doc["created_at"],
+        user_id=user_id,
     )
 
 
 @router.post("/login", response_model=Token)
-async def login(
-    credentials: OAuth2PasswordRequestForm = Depends(),
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
-    identifier = credentials.username.strip()
-    user = await db.users.find_one({
+async def login(request: Request):
+    identifier = ""
+    password = ""
+
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+            identifier = (body.get("username") or body.get("email") or "").strip()
+            password = body.get("password") or ""
+        except Exception:
+            pass
+    else:
+        try:
+            form = await request.form()
+            identifier = (form.get("username") or form.get("email") or "").strip()
+            password = form.get("password") or ""
+        except Exception:
+            pass
+
+    if not identifier or not password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username/email and password are required.",
+        )
+
+    user = mongo.users.find_one({
         "$or": [
             {"username": identifier},
             {"email": identifier.lower()},
         ]
     })
-    if not user or not verify_password(credentials.password, user["password_hash"]):
+    if not user or not user.get("password_hash") or not verify_password(password, user["password_hash"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password.",
@@ -96,10 +121,7 @@ async def login(
 
 
 @router.post("/refresh", response_model=Token)
-async def refresh_access_token(
-    payload: RefreshTokenRequest,
-    db: AsyncIOMotorDatabase = Depends(get_database),
-):
+async def refresh_access_token(payload: RefreshTokenRequest):
     result = await verify_and_rotate_refresh_token(payload.refresh_token)
     if not result:
         raise HTTPException(

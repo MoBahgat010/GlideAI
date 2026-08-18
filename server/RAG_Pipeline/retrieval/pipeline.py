@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from typing import Optional
-from ..storage.vector_database import VDB
+from ..storage.weaviate import WeaviateVDB
 from ..ingestion.embedding import MultimodalEncoder
 from .reranker import HybridReranker
 
@@ -12,7 +12,7 @@ class RetrievalPipeline:
         self,
         encoder: MultimodalEncoder,
         reranker: HybridReranker,
-        vdb: VDB,
+        vdb: WeaviateVDB,
         retrieve_top_k: int,
         rerank_top_k: int,
     ):
@@ -24,6 +24,9 @@ class RetrievalPipeline:
 
     async def retrieve(self, query: str, session_id: Optional[str] = None) -> dict:
         logger.info("Executing retrieval for query=%r, session_id=%s", query[:80], session_id)
+        if not session_id:
+            raise Exception("No session ID provided")
+        
         embedding = self.encoder.encode_query(query)
         candidates = self.vdb.hybrid_query(
             query_text=query,
