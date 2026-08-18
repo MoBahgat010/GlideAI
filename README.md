@@ -95,8 +95,7 @@ Inference is decoupled from the web application layer using **NVIDIA Triton Infe
 
 ### 6. Streaming Agent & Interactive Citations
 - **Server-Sent Events (SSE)**: Streams AI response tokens in real-time.
-- **Zero Tool Output Leakage**: Intermediate tool executions (e.g. raw JSON dumps, database queries) are intercepted and kept out of the user chat stream.
-- **NotebookLM-Style Citation Badges**: Inline citations (`[1]`, `[2]`) render as interactive badges with hover previews that open the PDF Spotlight Viewer modal at the exact bounding box and page.
+- **Citation Badges**: Inline citations (`[1]`, `[2]`) render as interactive badges with hover previews that open the PDF Spotlight Viewer modal at the exact bounding box and page.
 
 ---
 
