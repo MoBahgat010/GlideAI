@@ -1,6 +1,6 @@
 # Enterprise Multi-Modal Agentic RAG Platform
 
-> **A production-ready microservices Multi-Modal Agentic Retrieval-Augmented Generation (RAG) platform powered by Triton GPU inference acceleration, Rev.ai speech transcription, hybrid vector retrieval, and Google Workspace automation.**
+> **A production-ready microservices Multi-Modal Agentic RAG platform powered by Triton GPU inference acceleration, Rev.ai speech transcription, hybrid vector retrieval, and Google Workspace automation.**
 
 ---
 
